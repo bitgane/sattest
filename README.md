@@ -1,71 +1,81 @@
-# sattest README
+# Sattest – Lightning Bounties for VS Code Tests
 
-This is the README for your extension "sattest". After writing up a brief description, we recommend including the following sections.
+**Sattest** is a VS Code extension that lets you attach real Bitcoin Lightning bounties (via LNbits) to your test cases. Incentivize developers to fix failing tests by offering satoshis — paid out automatically or manually after passing.
 
 ## Features
 
-Describe specific features of your extension including screenshots of your extension in action. Image paths are relative to this README file.
-
-For example if there is an image subfolder under your extension project workspace:
-
-\!\[feature X\]\(images/feature-x.png\)
-
-> Tip: Many popular extensions utilize animations. This is an excellent way to show off your extension! We recommend short, focused animations that are easy to follow.
+- Add a Lightning bounty (in satoshis) to any test case
+- Generate QR code + BOLT11 invoice via your LNbits instance
+- Claim bounty by submitting a Lightning invoice (BOLT11)
+- Creator approves/rejects payout
+- Check payment status via LNbits API
+- Automatic payout on approval (or manual trigger)
+- Persistent storage using VS Code global state & secrets
+- Visual feedback via CodeLens and webview panels
 
 ## Requirements
 
-If you have any requirements or dependencies, add a section describing those and how to install and configure them.
+- VS Code 1.85+
+- A running LNbits instance (self-hosted or demo.lnbits.com)
+- LNbits Invoice/Read API key with payout permissions
 
-## Extension Settings
+## Installation
 
-Include if your extension adds any VS Code settings through the `contributes.configuration` extension point.
+1. Open VS Code
+2. Go to Extensions view (`Ctrl+Shift+X`)
+3. Search for **Sattest** (or install from VSIX if sideloading)
+4. Install & reload VS Code
 
-For example:
+(When published: Marketplace link will go here)
 
-This extension contributes the following settings:
+## Setup
 
-- `myExtension.enable`: Enable/disable this extension.
-- `myExtension.thing`: Set to `blah` to do something.
+1. Open Command Palette (`Ctrl+Shift+P`)
+2. Run **Sattest: Add Bounty** on a failing test (or right-click → Add Bounty)
+3. Enter amount in sats (1–50,000,000)
+4. If first time: provide your LNbits URL and Invoice API key
+   - Stored securely in VS Code secrets/global state
 
-## Known Issues
+## Usage
 
-Calling out known issues can help limit users opening duplicate issues against your extension.
+### Add a Bounty
 
-## Release Notes
+- Right-click a test → **Add Bounty**
+- Or run command: **Sattest: Add Bounty**
+- Enter sats amount → QR + invoice appears in webview
+- Fund the invoice via any Lightning wallet
 
-Users appreciate release notes as you update your extension.
+### Check Payment Status
 
-### 1.0.0
+- Right-click test → **Check Bounty Paid**
+- Extension queries LNbits → marks test as funded if paid
 
-Initial release of ...
+### Claim & Payout
 
-### 1.0.1
+- Passer submits Lightning invoice (claim)
+- Creator gets approval prompt
+- Approve → sats sent via LNbits payout
+- Reject → claim cancelled
 
-Fixed issue #.
+## Commands
 
-### 1.1.0
+| Command                          | Description                           |
+|----------------------------------|---------------------------------------|
+| `bountyTestPlugin.addBounty`     | Add bounty to selected test           |
+| `bountyTestPlugin.checkPaid`     | Check if bounty was paid              |
+| `bountyTestPlugin.claimBounty`   | Claim bounty by submitting invoice    |
+| `bountyTestPlugin.removeBounty`  | Remove bounty from test               |
 
-Added features X, Y, and Z.
+## Development / Contributing
 
----
+### Prerequisites
 
-## Following extension guidelines
+- Node.js 18+
+- npm / yarn
 
-Ensure that you've read through the extensions guidelines and follow the best practices for creating your extension.
+### Setup
 
-- [Extension Guidelines](https://code.visualstudio.com/api/references/extension-guidelines)
-
-## Working with Markdown
-
-You can author your README using Visual Studio Code. Here are some useful editor keyboard shortcuts:
-
-- Split the editor (`Cmd+\` on macOS or `Ctrl+\` on Windows and Linux).
-- Toggle preview (`Shift+Cmd+V` on macOS or `Shift+Ctrl+V` on Windows and Linux).
-- Press `Ctrl+Space` (Windows, Linux, macOS) to see a list of Markdown snippets.
-
-## For more information
-
-- [Visual Studio Code's Markdown Support](http://code.visualstudio.com/docs/languages/markdown)
-- [Markdown Syntax Reference](https://help.github.com/articles/markdown-basics/)
-
-**Enjoy!**
+```bash
+git clone https://github.com/bitgane/sattest.git
+cd sattest
+npm install
