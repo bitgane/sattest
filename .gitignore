@@ -1,0 +1,51 @@
+# Node.js / npm
+node_modules/
+npm-debug.log
+yarn-error.log
+package-lock.json  # Optional: remove if you want to commit it (many teams do)
+yarn.lock          # Optional: same as above
+
+# VS Code workspace / settings files (usually personal)
+.vscode/
+!.vscode/extensions.json   # Keep if you want to share recommended extensions
+!.vscode/launch.json       # Keep if you want to share debug configs
+!.vscode/tasks.json        # Keep if you want to share tasks
+
+# Build / compile output
+out/
+dist/
+lib/
+build/
+
+# Test coverage reports
+coverage/
+.nyc_output/
+
+# Logs and temporary files
+*.log
+*.log.*
+.DS_Store
+Thumbs.db
+
+# Editor / OS files
+.vscode-test/
+.vscodeignore
+.eslintcache
+.prettiercache
+
+# Optional: ignore Jest cache (speeds up tests)
+.jest-cache/
+
+# Optional: ignore TypeScript build artifacts if you use tsc directly
+*.tsbuildinfo
+
+# Optional: if you have local env files
+.env
+.env.local
+.env.development
+.env.test
+.env.production
+
+# Optional: if you generate screenshots or artifacts during tests
+screenshots/
+videos/

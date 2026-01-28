@@ -1,0 +1,110 @@
+{
+  "name": "sattest",
+  "displayName": "sattest",
+  "description": "earn sats for passing unit tests",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.106.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onLanguage:typescript",
+    "onLanguage:javascript",
+    "onView:testing"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "bountyTestPlugin.addBounty",
+        "title": "Add Bounty",
+        "category": "Bounty Test"
+      },
+      {
+        "command": "bountyTestPlugin.checkPaid",
+        "title": "Check Bounty Paid",
+        "category": "Bounty Test"
+      },
+      {
+        "command": "bountyTestPlugin.claimBounty",
+        "title": "Claim Bounty",
+        "category": "Bounty Test"
+      },
+      {
+        "command": "bountyTestPlugin.removeBounty",
+        "title": "Remove Bounty",
+        "category": "Bounty Test"
+      }
+    ],
+    "menus": {
+      "testing/item/gutter": [
+        {
+          "command": "bountyTestPlugin.addBounty",
+          "group": "navigation"
+        },
+        {
+          "command": "bountyTestPlugin.checkPaid",
+          "group": "navigation"
+        },
+        {
+          "command": "bountyTestPlugin.claimBounty",
+          "group": "navigation"
+        },
+        {
+          "command": "bountyTestPlugin.removeBounty",
+          "group": "navigation"
+        }
+      ],
+      "testing/item/context": [
+        {
+          "command": "bountyTestPlugin.addBounty",
+          "group": "inline"
+        },
+        {
+          "command": "bountyTestPlugin.checkPaid",
+          "group": "inline"
+        },
+        {
+          "command": "bountyTestPlugin.claimBounty",
+          "group": "inline"
+        },
+        {
+          "command": "bountyTestPlugin.removeBounty",
+          "group": "inline"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src",
+    "test": "jest",
+    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md}\"",
+    "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,md}\""
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.14",
+    "@types/node": "22.x",
+    "@types/qrcode": "^1.5.6",
+    "@types/qrcode-svg": "^1.1.5",
+    "@types/vscode": "^1.106.0",
+    "@vscode/test-cli": "^0.0.12",
+    "@vscode/test-electron": "^2.5.2",
+    "eslint": "^9.39.1",
+    "jest": "^29.7.0",
+    "prettier": "^3.8.1",
+    "ts-jest": "^29.4.6",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.48.1"
+  },
+  "dependencies": {
+    "bolt11": "^1.4.1",
+    "qrcode": "^1.5.4",
+    "qrcodejs": "^1.0.0"
+  }
+}
