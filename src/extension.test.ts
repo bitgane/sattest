@@ -4,7 +4,7 @@ import { initializeSecrets } from './state.js';
 import { fetchBounties } from './api/bounty.api.js';
 import { connectNostr } from './api/nostr.api.js';
 import { activateTestController, myTestController } from './test/test-controller.js';
-import { findTestItemById } from './test/test-item.util.js';
+import { findTestItemById, getRepoSlug, getLocalTestIds } from './test/test-item.util.js';
 
 jest.mock('./api/bounty.api', () => ({
   fetchBounties: jest.fn().mockResolvedValue([]),
@@ -43,6 +43,9 @@ jest.mock('./test/test-item.util', () => ({
     label: 'test',
     children: [],
   }),
+  getRepoSlug: jest.fn().mockReturnValue('owner/repo'),
+  getLocalTestIds: jest.fn().mockReturnValue([]),
+  workspaceRoot: jest.fn().mockReturnValue('/mock/workspace'),
 }));
 
 function createMockContext(): vscode.ExtensionContext {

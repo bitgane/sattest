@@ -6,6 +6,8 @@ import {
   relativeTestPath,
   normalizedTestPath,
   normalizedTestId,
+  parseRepoSlug,
+  getLocalTestIds,
 } from './test-item.util.js';
 import { myTestController } from './test-controller.js';
 
@@ -193,5 +195,68 @@ describe('findTestItemById', () => {
     expect(result).toBeDefined();
     expect(result.id).toBe('nonexistent-test');
     expect(result.label).toBe('Unknown Test');
+  });
+});
+
+describe('parseRepoSlug', () => {
+  it('parses HTTPS GitHub URL', () => {
+    expect(parseRepoSlug('https://github.com/owner/repo.git')).toBe('owner/repo');
+  });
+
+  it('parses HTTPS URL without .git suffix', () => {
+    expect(parseRepoSlug('https://github.com/owner/repo')).toBe('owner/repo');
+  });
+
+  it('parses SSH URL', () => {
+    expect(parseRepoSlug('git@github.com:owner/repo.git')).toBe('owner/repo');
+  });
+
+  it('parses SSH URL without .git suffix', () => {
+    expect(parseRepoSlug('git@github.com:owner/repo')).toBe('owner/repo');
+  });
+
+  it('parses GitLab SSH URL', () => {
+    expect(parseRepoSlug('git@gitlab.com:team/project.git')).toBe('team/project');
+  });
+
+  it('parses URL with credentials', () => {
+    expect(parseRepoSlug('http://user@host:3000/git/owner/repo')).toBe('owner/repo');
+  });
+
+  it('returns empty string for unrecognized format', () => {
+    expect(parseRepoSlug('not-a-url')).toBe('');
+  });
+});
+
+describe('getLocalTestIds', () => {
+  beforeEach(() => {
+    (myTestController.items as any)._items.clear();
+  });
+
+  it('returns empty array when no test items exist', () => {
+    (myTestController.items.forEach as jest.Mock).mockImplementation(() => {});
+    expect(getLocalTestIds()).toEqual([]);
+  });
+
+  it('collects test IDs and strips workspace root', () => {
+    const mockChild1 = { id: '/mock/workspace/src/foo.test.ts#test1' };
+    const mockChild2 = { id: '/mock/workspace/src/foo.test.ts#test2' };
+
+    const mockFileItem = {
+      id: '/mock/workspace/src/foo.test.ts',
+      children: {
+        forEach: jest.fn().mockImplementation((cb: any) => {
+          cb(mockChild1);
+          cb(mockChild2);
+        }),
+      },
+    };
+
+    (myTestController.items.forEach as jest.Mock).mockImplementation((cb: any) => {
+      cb(mockFileItem, mockFileItem.id);
+    });
+
+    const ids = getLocalTestIds();
+    expect(ids).toEqual(['/src/foo.test.ts#test1', '/src/foo.test.ts#test2']);
   });
 });

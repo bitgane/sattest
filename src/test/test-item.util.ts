@@ -1,6 +1,61 @@
 import * as vscode from 'vscode';
+import { execSync } from 'child_process';
 import { myTestController } from './test-controller.js'; // adjust path to your controller import
 import { CustomTestItem, TestItemWrapper } from './test-item-wrapper.js';
+
+let cachedRepoSlug: string | undefined;
+
+export function getRepoSlug(): string | undefined {
+  if (cachedRepoSlug !== undefined) {
+    return cachedRepoSlug || undefined;
+  }
+
+  try {
+    const root = workspaceRoot();
+    if (!root) {
+      cachedRepoSlug = '';
+      return undefined;
+    }
+
+    const remoteUrl = execSync('git remote get-url origin', {
+      cwd: root,
+      encoding: 'utf-8',
+      timeout: 5000,
+    }).trim();
+
+    cachedRepoSlug = parseRepoSlug(remoteUrl);
+    return cachedRepoSlug || undefined;
+  } catch {
+    cachedRepoSlug = '';
+    return undefined;
+  }
+}
+
+export function parseRepoSlug(remoteUrl: string): string {
+  // SSH: git@github.com:owner/repo.git
+  const sshMatch = remoteUrl.match(/[:\/]([^/]+\/[^/]+?)(?:\.git)?$/);
+  if (sshMatch) {
+    return sshMatch[1];
+  }
+  return '';
+}
+
+export function getLocalTestIds(): string[] {
+  const ids: string[] = [];
+  const rootPath = workspaceRoot();
+
+  myTestController.items.forEach((fileItem) => {
+    fileItem.children.forEach((testItem) => {
+      let id = testItem.id;
+      if (rootPath && id.startsWith(rootPath)) {
+        id = id.slice(rootPath.length);
+      }
+      ids.push(id);
+    });
+  });
+
+  return ids;
+}
 
 /**
  * Recursively searches the Test Controller's items for a TestItem with the given ID.
