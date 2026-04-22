@@ -66,7 +66,8 @@ export async function createBounty(
   lnbitsUrl: string | undefined,
   lnbitsApiKey: string | undefined,
   test: vscode.TestItem,
-  creatorId: string | undefined
+  creatorId: string | undefined,
+  repo?: string
 ): Promise<BountyInfo | undefined> {
   try {
     let invoiceForApi = '';
@@ -93,6 +94,10 @@ export async function createBounty(
         amountSats: amountSats,
         creatorId: creatorId,
         memo,
+        // Tagging the bounty with the workspace's git repo slug lets the
+        // backend serve per-repo listings to unauthenticated clients. Omitted
+        // when the workspace has no configured git remote.
+        ...(repo ? { repo } : {}),
       }),
     });
     if (!response.ok) {
