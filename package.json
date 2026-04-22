@@ -9,7 +9,7 @@
   "icon": "images/icon.png",
   "type": "module",
   "displayName": "sattest",
-  "description": "earn sats for passing unit tests",
+  "description": "Turn your test suite into a bounty board, paid in bitcoin over Lightning.",
   "version": "0.1.0",
   "engines": {
     "vscode": "^1.106.0"
