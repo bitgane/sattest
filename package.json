@@ -1,13 +1,21 @@
 {
   "name": "sattest",
+  "publisher": "bitgane",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bitgane/sattest.git"
+  },
+  "license": "MIT",
+  "icon": "images/icon.png",
   "type": "module",
   "displayName": "sattest",
   "description": "earn sats for passing unit tests",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "engines": {
     "vscode": "^1.106.0"
   },
   "categories": [
+    "Testing",
     "Other"
   ],
   "activationEvents": [
