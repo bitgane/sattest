@@ -9,7 +9,7 @@ import {
 import { BountyInfo } from './bounty/bounty.types.js';
 import { BountyCodeLensProvider } from './bounty/bounty-code-lens.js';
 import { fetchBounties } from './api/bounty.api.js';
-import { findTestItemById } from './test/test-item.util.js';
+import { findTestItemById, getRepoSlug, getLocalTestIds } from './test/test-item.util.js';
 import { activateTestController, myTestController } from './test/test-controller.js';
 import { CustomTestItem } from './test/test-item-wrapper.js';
 import { connectNostr } from './api/nostr.api.js';
@@ -26,10 +26,13 @@ export async function activate(context: vscode.ExtensionContext) {
   // Activate Test Controller & register tests
   activateTestController(context);
 
+  // Resolve repo slug once at startup for all bounty queries
+  const repoSlug = getRepoSlug();
+
   // Load bounties from backend on startup
   let backendBounties: BountyInfo[] = [];
   try {
-    backendBounties = await fetchBounties();
+    backendBounties = await fetchBounties({ repo: repoSlug });
     attachTestItems(backendBounties, bounties);
   } catch (err) {
     console.error('[Extension] Failed to load bounties from backend on startup:', err);
@@ -78,7 +81,8 @@ export async function activate(context: vscode.ExtensionContext) {
     vscode.window.onDidChangeActiveTextEditor((editor) => {
       if (editor && SUPPORTED_LANGUAGE_IDS.includes(editor.document.languageId)) {
         console.debug('[Extension] Active editor changed – refreshing bounties & lenses');
-        fetchBounties()
+        const localIds = getLocalTestIds();
+        fetchBounties({ repo: repoSlug, testIds: localIds.length > 0 ? localIds : undefined })
           .then((backendBounties) => {
             attachTestItems(backendBounties, bounties);
             onBountiesChangedEmitter.fire();
@@ -88,15 +92,21 @@ export async function activate(context: vscode.ExtensionContext) {
     })
   );
 
-  // NEW: Wait for Test Controller to populate items, then re-attach testItems
+  // Wait for Test Controller to populate items, then re-fetch with precise filters
   const checkTestItemsInterval = setInterval(() => {
     const count = myTestController.items.size;
     if (count > 0) {
-      attachTestItems(backendBounties, bounties);
-      onBountiesChangedEmitter.fire();
-      clearInterval(checkTestItemsInterval); // stop polling
+      clearInterval(checkTestItemsInterval);
+      const localIds = getLocalTestIds();
+      fetchBounties({ repo: repoSlug, testIds: localIds.length > 0 ? localIds : undefined })
+        .then((filtered) => {
+          backendBounties = filtered;
+          attachTestItems(backendBounties, bounties);
+          onBountiesChangedEmitter.fire();
+        })
+        .catch((err) => console.error('[Extension] Filtered re-fetch failed:', err));
     }
-  }, 2000); // check every 2 seconds
+  }, 2000);
 
   // Stop polling after 30 seconds max
   setTimeout(() => {

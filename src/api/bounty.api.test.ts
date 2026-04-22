@@ -61,7 +61,7 @@ describe('fetchBounties', () => {
       json: async () => ({ bounties: [] }),
     } as any);
 
-    await fetchBounties('my-test-id');
+    await fetchBounties({ testId: 'my-test-id' });
     const callUrl = (global.fetch as jest.Mock).mock.calls[0][0];
     expect(callUrl.toString()).toContain('testId=my-test-id');
   });
@@ -72,7 +72,7 @@ describe('fetchBounties', () => {
       json: async () => ({ bounties: [] }),
     } as any);
 
-    await fetchBounties(undefined, true);
+    await fetchBounties({ includeInactive: true });
     const callUrl = (global.fetch as jest.Mock).mock.calls[0][0];
     expect(callUrl.toString()).toContain('includeInactive=true');
   });
@@ -98,6 +98,42 @@ describe('fetchBounties', () => {
     expect(vscode.window.showErrorMessage).toHaveBeenCalledWith(
       'Failed to load bounties from backend'
     );
+  });
+
+  it('appends repo query param when provided', async () => {
+    jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({ bounties: [] }),
+    } as any);
+
+    await fetchBounties({ repo: 'owner/repo' });
+    const callUrl = (global.fetch as jest.Mock).mock.calls[0][0];
+    expect(callUrl.toString()).toContain('repo=owner%2Frepo');
+  });
+
+  it('POSTs to /bounties/filter when testIds provided', async () => {
+    jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({ bounties: [] }),
+    } as any);
+
+    await fetchBounties({ testIds: ['/src/foo.test.ts#test1'], repo: 'owner/repo' });
+    const [callUrl, callOpts] = (global.fetch as jest.Mock).mock.calls[0];
+    expect(callUrl.toString()).toContain('/bounties/filter');
+    expect(callUrl.toString()).toContain('repo=owner%2Frepo');
+    expect(callOpts.method).toBe('POST');
+    expect(JSON.parse(callOpts.body)).toEqual({ testIds: ['/src/foo.test.ts#test1'] });
+  });
+
+  it('uses GET without testIds', async () => {
+    jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({ bounties: [] }),
+    } as any);
+
+    await fetchBounties({ repo: 'owner/repo' });
+    const [, callOpts] = (global.fetch as jest.Mock).mock.calls[0];
+    expect(callOpts).toEqual({});
   });
 });
 

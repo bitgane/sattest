@@ -60,6 +60,7 @@ jest.mock('../api/bounty.api', () => ({
 jest.mock('../test/test-item.util', () => ({
   normalizedTestId: jest.fn().mockImplementation((test: any) => test.id),
   removeParentLabelFromTestId: jest.fn().mockImplementation((test: any) => test.id),
+  getRepoSlug: jest.fn().mockReturnValue('owner/repo'),
 }));
 
 // Helpers

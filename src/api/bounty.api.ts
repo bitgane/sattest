@@ -5,21 +5,37 @@ import { getNostrAuthHeaders } from './nostr-auth.js';
 import { getBackendUrl } from './config.js';
 import { createLnbitsInvoice } from './lnbits.api.js';
 
-// Fetch all bounties from backend (or filter by testId)
-export async function fetchBounties(
-  testId?: string,
-  includeInactive = false
-): Promise<BountyInfo[]> {
+export interface FetchBountiesOptions {
+  testId?: string;
+  includeInactive?: boolean;
+  repo?: string;
+  testIds?: string[];
+}
+
+export async function fetchBounties(options: FetchBountiesOptions = {}): Promise<BountyInfo[]> {
+  const { testId, includeInactive = false, repo, testIds } = options;
   try {
-    const url = new URL(`${getBackendUrl()}/bounties`);
+    const usePost = testIds && testIds.length > 0;
+    const url = new URL(`${getBackendUrl()}/bounties${usePost ? '/filter' : ''}`);
     if (testId) {
       url.searchParams.append('testId', testId);
     }
     if (includeInactive) {
       url.searchParams.append('includeInactive', 'true');
     }
+    if (repo) {
+      url.searchParams.append('repo', repo);
+    }
 
-    const response = await fetch(url, {});
+    const fetchOptions: RequestInit = usePost
+      ? {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ testIds }),
+        }
+      : {};
+
+    const response = await fetch(url, fetchOptions);
 
     if (!response.ok) {
       throw new Error(`[fetchBounties] Failed to fetch bounties: ${response.status}`);
@@ -50,7 +66,8 @@ export async function createBounty(
   lnbitsUrl: string | undefined,
   lnbitsApiKey: string | undefined,
   test: vscode.TestItem,
-  creatorId: string | undefined
+  creatorId: string | undefined,
+  repo?: string
 ): Promise<BountyInfo | undefined> {
   try {
     let invoiceForApi = '';
@@ -77,6 +94,10 @@ export async function createBounty(
         amountSats: amountSats,
         creatorId: creatorId,
         memo,
+        // Tagging the bounty with the workspace's git repo slug lets the
+        // backend serve per-repo listings to unauthenticated clients. Omitted
+        // when the workspace has no configured git remote.
+        ...(repo ? { repo } : {}),
       }),
     });
     if (!response.ok) {

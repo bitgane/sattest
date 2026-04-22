@@ -1,7 +1,11 @@
 import * as vscode from 'vscode';
 import { toString } from 'qrcode';
 import { BountyInfo, claimStatusApproved, claimStatusPending } from './bounty.types.js';
-import { normalizedTestId, removeParentLabelFromTestId } from '../test/test-item.util.js';
+import {
+  getRepoSlug,
+  normalizedTestId,
+  removeParentLabelFromTestId,
+} from '../test/test-item.util.js';
 import { CustomTestItem } from '../test/test-item-wrapper.js';
 import * as crypto from 'crypto';
 import {
@@ -112,13 +116,19 @@ export const addBountyCommand = (
         }
         await setIsDefaultLnbits((!userLnbitsConfig).toString());
       }
+      // Scope the bounty to the workspace's git repo when possible so it
+      // shows up in unauthenticated `GET /bounties?repo=...` / filter calls
+      // for everyone else working in the same repo. Undefined when the
+      // workspace has no configured git remote — backend stores null.
+      const repoSlug = getRepoSlug();
 
       const newBountyFromBackend = (await createBounty(
         amountSats,
         userLnbitsConfig?.url,
         userLnbitsConfig?.apiKey,
         test,
-        userNostrPubkey
+        userNostrPubkey,
+        repoSlug
       )) as BountyInfo;
       // Create full local bounty by merging backend data + original testItem
 
