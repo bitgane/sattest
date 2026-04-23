@@ -122,16 +122,23 @@ export const addBountyCommand = (
       // workspace has no configured git remote — backend stores null.
       const repoSlug = getRepoSlug();
 
-      const newBountyFromBackend = (await createBounty(
+      const newBountyFromBackend = await createBounty(
         amountSats,
         userLnbitsConfig?.url,
         userLnbitsConfig?.apiKey,
         test,
         userNostrPubkey,
         repoSlug
-      )) as BountyInfo;
-      // Create full local bounty by merging backend data + original testItem
+      );
 
+      // If the backend call failed, `createBounty` already surfaced a toast
+      // ("Failed to create bounty in backend") and returned undefined. Bail
+      // before we open a QR panel with empty data.
+      if (!newBountyFromBackend) {
+        return;
+      }
+
+      // Create full local bounty by merging backend data + original testItem
       const fullBounty: BountyInfo = {
         ...newBountyFromBackend, // backend fields (id, invoice, paymentHash, etc.)
         testId: testId, // ensure consistency
