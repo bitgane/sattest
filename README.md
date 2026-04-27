@@ -83,6 +83,19 @@ Sattest discovers tests in all major languages and frameworks:
 - Only the bounty creator (verified via Nostr pubkey) can approve
 - Approve → sats sent via LNbits payout
 
+### Remove a Bounty
+
+- Right-click a test with a bounty → **Remove Bounty**
+- Only the bounty creator (verified via Nostr pubkey) can remove it
+- If the invoice was already funded and no claim has been approved, you'll be
+  prompted for an LNURL or Lightning address to **refund** the sats to before
+  the bounty is deactivated
+  - Unfunded bounties are deactivated silently — no prompt, nothing to refund
+  - Bounties whose claim has already been approved can't be refunded (the sats
+    are already out the door)
+  - If a claim is still _pending_, you'll be warned that refunding abandons
+    the claimant before the LNURL prompt appears
+
 ### Connect Nostr
 
 - Press `Ctrl+Alt+N` (`Cmd+Alt+N` on Mac) to connect your Nostr identity

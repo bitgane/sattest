@@ -95,9 +95,19 @@ describe('fetchBounties', () => {
 
     const result = await fetchBounties();
     expect(result).toEqual([]);
-    expect(vscode.window.showErrorMessage).toHaveBeenCalledWith(
-      'Failed to load bounties from backend'
-    );
+    // The toast is rate-limited (10s cooldown) and the prior failure case in
+    // this suite already burned the window, so we only assert the empty-array
+    // contract here, not the toast.
+  });
+
+  it('returns empty array when response has no bounties field', async () => {
+    jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({}),
+    } as any);
+
+    const result = await fetchBounties();
+    expect(result).toEqual([]);
   });
 
   it('appends repo query param when provided', async () => {
@@ -207,6 +217,60 @@ describe('createBounty', () => {
 
     const result = await createBounty(5000, undefined, undefined, mockTest, 'creator-pub');
     expect(result).toBeUndefined();
+  });
+
+  it('falls back to status when error body has no message', async () => {
+    jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: false,
+      status: 502,
+      json: async () => ({}),
+    } as any);
+
+    const result = await createBounty(5000, undefined, undefined, mockTest, 'creator-pub');
+    expect(result).toBeUndefined();
+  });
+
+  it('omits fundingMode from POST body when default (custodial)', async () => {
+    jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({ id: 'bounty-uuid' }),
+    } as any);
+
+    await createBounty(5000, undefined, undefined, mockTest, 'creator-pub');
+    const body = JSON.parse((global.fetch as jest.Mock).mock.calls[0][1].body);
+    // Backward-compat: older backends shouldn't see an unknown field.
+    expect(body.fundingMode).toBeUndefined();
+  });
+
+  it('skips LNbits invoice creation when fundingMode is nwc', async () => {
+    const { createLnbitsInvoice } = require('./lnbits.api');
+    (createLnbitsInvoice as jest.Mock).mockClear();
+
+    jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({ id: 'bounty-uuid', fundingMode: 'nwc' }),
+    } as any);
+
+    await createBounty(5000, '', 'my-api-key', mockTest, 'creator-pub', undefined, 'nwc');
+
+    // No invoice minted for NWC — sats stay in the creator's wallet.
+    expect(createLnbitsInvoice).not.toHaveBeenCalled();
+    const body = JSON.parse((global.fetch as jest.Mock).mock.calls[0][1].body);
+    expect(body.fundingMode).toBe('nwc');
+    expect(body.frontEndInvoice).toBe('');
+    expect(body.frontEndPaymentHash).toBe('');
+  });
+
+  it('forwards repo when provided alongside fundingMode', async () => {
+    jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({ id: 'bounty-uuid' }),
+    } as any);
+
+    await createBounty(5000, undefined, undefined, mockTest, 'creator-pub', 'owner/repo', 'nwc');
+    const body = JSON.parse((global.fetch as jest.Mock).mock.calls[0][1].body);
+    expect(body.repo).toBe('owner/repo');
+    expect(body.fundingMode).toBe('nwc');
   });
 });
 
@@ -356,38 +420,148 @@ describe('claimBountyWithLnAddress', () => {
 });
 
 describe('deactivateBounty', () => {
-  it('returns true on success', async () => {
-    jest.spyOn(global, 'fetch').mockResolvedValue({
+  it('no-refund path: sends no body, returns {success: true}', async () => {
+    const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({
       ok: true,
+      json: async () => ({ success: true }),
     } as any);
 
     const result = await deactivateBounty('bounty-uuid');
-    expect(result).toBe(true);
-    expect(global.fetch).toHaveBeenCalledWith(
+    expect(result).toEqual({ success: true, refund: undefined });
+    expect(fetchSpy).toHaveBeenCalledWith(
       'http://localhost:3000/bounties/bounty-uuid/deactivate',
       expect.objectContaining({ method: 'PATCH' })
     );
+    // No body sent when refundLnurl is omitted
+    const init = fetchSpy.mock.calls[0][1] as RequestInit;
+    expect(init.body).toBeUndefined();
   });
 
-  it('returns false on non-OK response', async () => {
-    jest.spyOn(global, 'fetch').mockResolvedValue({
-      ok: false,
-      status: 403,
-      text: async () => 'Forbidden',
+  it('refund path: sends refundLnurl body, returns refund info', async () => {
+    const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        success: true,
+        refund: { checkingId: 'chk-1', amountSats: 1000 },
+      }),
     } as any);
 
-    const result = await deactivateBounty('bounty-uuid');
-    expect(result).toBe(false);
+    const result = await deactivateBounty('bounty-uuid', 'alice@primal.net');
+    expect(result).toEqual({
+      success: true,
+      refund: { checkingId: 'chk-1', amountSats: 1000 },
+    });
+    const init = fetchSpy.mock.calls[0][1] as RequestInit;
+    expect(init.body).toBe(JSON.stringify({ refundLnurl: 'alice@primal.net' }));
+  });
+
+  it('returns {success: false} on non-OK response and surfaces backend error', async () => {
+    jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: false,
+      status: 400,
+      json: async () => ({ error: 'Already refunded' }),
+    } as any);
+
+    const result = await deactivateBounty('bounty-uuid', 'alice@primal.net');
+    expect(result).toEqual({ success: false });
     expect(vscode.window.showErrorMessage).toHaveBeenCalledWith(
-      expect.stringContaining('Failed to deactivate bounty')
+      expect.stringContaining('Already refunded')
     );
   });
 
-  it('returns false on network error', async () => {
+  it('returns {success: false} on network error', async () => {
     jest.spyOn(global, 'fetch').mockRejectedValue(new Error('offline'));
 
     const result = await deactivateBounty('bounty-uuid');
-    expect(result).toBe(false);
+    expect(result).toEqual({ success: false });
+  });
+
+  it('combines errorData.error + dev-mode message when both present', async () => {
+    jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: false,
+      status: 500,
+      json: async () => ({
+        error: 'Failed to deactivate bounty',
+        message: 'LNbits payout error: 520',
+      }),
+    } as any);
+
+    await deactivateBounty('bounty-uuid', 'alice@primal.net');
+    // Frontend prefers `${error}: ${message}` so the user sees the real cause.
+    expect(vscode.window.showErrorMessage).toHaveBeenCalledWith(
+      expect.stringContaining('Failed to deactivate bounty: LNbits payout error: 520')
+    );
+  });
+
+  it('skips dev-mode message when it is the generic "Internal server error"', async () => {
+    jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: false,
+      status: 500,
+      json: async () => ({
+        error: 'Some specific error',
+        message: 'Internal server error',
+      }),
+    } as any);
+
+    await deactivateBounty('bounty-uuid');
+    expect(vscode.window.showErrorMessage).toHaveBeenCalledWith(
+      expect.stringContaining('Some specific error')
+    );
+    expect(vscode.window.showErrorMessage).not.toHaveBeenCalledWith(
+      expect.stringContaining('Internal server error')
+    );
+  });
+
+  it('falls back to status when JSON body has neither error nor message', async () => {
+    jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: false,
+      status: 503,
+      json: async () => ({}),
+    } as any);
+
+    await deactivateBounty('bounty-uuid');
+    expect(vscode.window.showErrorMessage).toHaveBeenCalledWith(
+      expect.stringContaining('503')
+    );
+  });
+
+  it('falls back to status when body is not JSON', async () => {
+    jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: false,
+      status: 502,
+      json: async () => {
+        throw new Error('not json');
+      },
+    } as any);
+
+    await deactivateBounty('bounty-uuid');
+    expect(vscode.window.showErrorMessage).toHaveBeenCalledWith(
+      expect.stringContaining('502')
+    );
+  });
+
+  it('treats success body without success field as successful', async () => {
+    jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({}),
+    } as any);
+
+    const result = await deactivateBounty('bounty-uuid');
+    // success defaults to true when the field is absent — keeps the existing
+    // contract that a 2xx response without a body still means "deactivated".
+    expect(result).toEqual({ success: true, refund: undefined });
+  });
+
+  it('returns {success: true} when success body is not JSON', async () => {
+    jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => {
+        throw new Error('not json');
+      },
+    } as any);
+
+    const result = await deactivateBounty('bounty-uuid');
+    expect(result).toEqual({ success: true, refund: undefined });
   });
 });
 

@@ -14,6 +14,12 @@ jest.mock('./api/nostr.api', () => ({
   connectNostr: jest.fn().mockResolvedValue(undefined),
 }));
 
+jest.mock('./api/nwc.api', () => ({
+  setNwcUri: jest.fn().mockResolvedValue(true),
+  clearNwcUri: jest.fn().mockResolvedValue(true),
+  getNwcStatus: jest.fn().mockResolvedValue({ configured: false }),
+}));
+
 jest.mock('./state', () => ({
   initializeSecrets: jest.fn(),
   getNostrUserPubkey: jest.fn().mockResolvedValue(undefined),
@@ -278,6 +284,270 @@ describe('extension', () => {
 
       const context = createMockContext();
       await activate(context);
+    });
+  });
+
+  describe('connectWallet command', () => {
+    async function captureHandler(commandId: string): Promise<Function> {
+      let captured: Function | undefined;
+      (vscode.commands.registerCommand as jest.Mock).mockImplementation(
+        (id: string, handler: Function) => {
+          if (id === commandId) {
+            captured = handler;
+          }
+          return { dispose: jest.fn() };
+        }
+      );
+      await activate(createMockContext());
+      if (!captured){
+        throw new Error(`${commandId} not registered`);
+      }
+      return captured;
+    }
+
+    beforeEach(() => {
+      const { setNwcUri, getNwcStatus } = require('./api/nwc.api');
+      (setNwcUri as jest.Mock).mockClear().mockResolvedValue(true);
+      (getNwcStatus as jest.Mock).mockClear();
+      const { getNostrUserPubkey } = require('./state');
+      (getNostrUserPubkey as jest.Mock).mockReset().mockResolvedValue(undefined);
+      (vscode.window.showInputBox as jest.Mock).mockReset();
+      (vscode.window.showQuickPick as jest.Mock | undefined)?.mockReset?.();
+      (vscode.window.showInformationMessage as jest.Mock).mockClear();
+      (vscode.window.showErrorMessage as jest.Mock).mockClear();
+    });
+
+    it('errors out when Nostr is not connected', async () => {
+      const handler = await captureHandler('sattest.connectWallet');
+      await handler();
+      expect(vscode.window.showErrorMessage).toHaveBeenCalledWith(
+        expect.stringContaining('Connect to Nostr first')
+      );
+      const { setNwcUri } = require('./api/nwc.api');
+      expect(setNwcUri).not.toHaveBeenCalled();
+    });
+
+    it('returns silently when user cancels the URI prompt', async () => {
+      const { getNostrUserPubkey } = require('./state');
+      (getNostrUserPubkey as jest.Mock).mockResolvedValue('npub-pub');
+      (vscode.window.showInputBox as jest.Mock).mockResolvedValue(undefined);
+
+      const handler = await captureHandler('sattest.connectWallet');
+      await handler();
+
+      const { setNwcUri } = require('./api/nwc.api');
+      expect(setNwcUri).not.toHaveBeenCalled();
+    });
+
+    it('returns silently when user dismisses the budget-window quick-pick', async () => {
+      const { getNostrUserPubkey } = require('./state');
+      (getNostrUserPubkey as jest.Mock).mockResolvedValue('npub-pub');
+      (vscode.window.showInputBox as jest.Mock).mockResolvedValue('nostr+walletconnect://abc');
+      (vscode.window.showQuickPick as jest.Mock).mockResolvedValue(undefined);
+
+      const handler = await captureHandler('sattest.connectWallet');
+      await handler();
+
+      const { setNwcUri } = require('./api/nwc.api');
+      expect(setNwcUri).not.toHaveBeenCalled();
+    });
+
+    it('connects with no budget when user picks "Skip"', async () => {
+      const { getNostrUserPubkey } = require('./state');
+      (getNostrUserPubkey as jest.Mock).mockResolvedValue('npub-pub');
+      (vscode.window.showInputBox as jest.Mock).mockResolvedValue('  nostr+walletconnect://abc  ');
+      (vscode.window.showQuickPick as jest.Mock).mockResolvedValue({
+        label: 'Skip',
+        value: undefined,
+      });
+
+      const handler = await captureHandler('sattest.connectWallet');
+      await handler();
+
+      const { setNwcUri } = require('./api/nwc.api');
+      expect(setNwcUri).toHaveBeenCalledWith('nostr+walletconnect://abc', undefined, undefined);
+      expect(vscode.window.showInformationMessage).toHaveBeenCalledWith(
+        expect.stringContaining('connected')
+      );
+    });
+
+    it('connects with budget sats when user provides them', async () => {
+      const { getNostrUserPubkey } = require('./state');
+      (getNostrUserPubkey as jest.Mock).mockResolvedValue('npub-pub');
+      (vscode.window.showInputBox as jest.Mock)
+        .mockResolvedValueOnce('nostr+walletconnect://abc') // URI
+        .mockResolvedValueOnce('  100000  '); // budget sats
+      (vscode.window.showQuickPick as jest.Mock).mockResolvedValue({
+        label: 'Daily',
+        value: 'daily',
+      });
+
+      const handler = await captureHandler('sattest.connectWallet');
+      await handler();
+
+      const { setNwcUri } = require('./api/nwc.api');
+      expect(setNwcUri).toHaveBeenCalledWith('nostr+walletconnect://abc', 100000, 'daily');
+    });
+
+    it('connects without budget when user leaves sats blank', async () => {
+      const { getNostrUserPubkey } = require('./state');
+      (getNostrUserPubkey as jest.Mock).mockResolvedValue('npub-pub');
+      (vscode.window.showInputBox as jest.Mock)
+        .mockResolvedValueOnce('nostr+walletconnect://abc')
+        .mockResolvedValueOnce(''); // empty budget
+      (vscode.window.showQuickPick as jest.Mock).mockResolvedValue({
+        label: 'Weekly',
+        value: 'weekly',
+      });
+
+      const handler = await captureHandler('sattest.connectWallet');
+      await handler();
+
+      const { setNwcUri } = require('./api/nwc.api');
+      expect(setNwcUri).toHaveBeenCalledWith(
+        'nostr+walletconnect://abc',
+        undefined,
+        'weekly'
+      );
+    });
+
+    it('skips success toast when setNwcUri returns false', async () => {
+      const { getNostrUserPubkey } = require('./state');
+      (getNostrUserPubkey as jest.Mock).mockResolvedValue('npub-pub');
+      (vscode.window.showInputBox as jest.Mock).mockResolvedValue('nostr+walletconnect://abc');
+      (vscode.window.showQuickPick as jest.Mock).mockResolvedValue({
+        label: 'Skip',
+        value: undefined,
+      });
+      const { setNwcUri } = require('./api/nwc.api');
+      (setNwcUri as jest.Mock).mockResolvedValueOnce(false);
+
+      const handler = await captureHandler('sattest.connectWallet');
+      await handler();
+
+      // setNwcUri itself surfaces the error toast — extension stays quiet.
+      expect(vscode.window.showInformationMessage).not.toHaveBeenCalledWith(
+        expect.stringContaining('connected')
+      );
+    });
+
+    describe('URI validateInput', () => {
+      it('rejects strings missing the nostr+walletconnect:// scheme', async () => {
+        const { getNostrUserPubkey } = require('./state');
+        (getNostrUserPubkey as jest.Mock).mockResolvedValue('npub-pub');
+        (vscode.window.showInputBox as jest.Mock).mockResolvedValue(undefined);
+
+        const handler = await captureHandler('sattest.connectWallet');
+        await handler();
+
+        const opts = (vscode.window.showInputBox as jest.Mock).mock.calls[0][0];
+        expect(opts.validateInput('https://example.com')).toMatch(/Expected/);
+        expect(opts.validateInput('  nostr+walletconnect://x  ')).toBeNull();
+      });
+    });
+
+    describe('budget sats validateInput', () => {
+      it('accepts blank, accepts positive ints, rejects others', async () => {
+        const { getNostrUserPubkey } = require('./state');
+        (getNostrUserPubkey as jest.Mock).mockResolvedValue('npub-pub');
+        (vscode.window.showInputBox as jest.Mock)
+          .mockResolvedValueOnce('nostr+walletconnect://abc')
+          .mockResolvedValueOnce(undefined);
+        (vscode.window.showQuickPick as jest.Mock).mockResolvedValue({
+          label: 'Daily',
+          value: 'daily',
+        });
+
+        const handler = await captureHandler('sattest.connectWallet');
+        await handler();
+
+        const opts = (vscode.window.showInputBox as jest.Mock).mock.calls[1][0];
+        expect(opts.validateInput('')).toBeNull();
+        expect(opts.validateInput('  ')).toBeNull();
+        expect(opts.validateInput('1000')).toBeNull();
+        expect(opts.validateInput('0')).toMatch(/positive/);
+        expect(opts.validateInput('-5')).toMatch(/positive/);
+        expect(opts.validateInput('abc')).toMatch(/positive/);
+      });
+    });
+  });
+
+  describe('disconnectWallet command', () => {
+    async function captureHandler(commandId: string): Promise<Function> {
+      let captured: Function | undefined;
+      (vscode.commands.registerCommand as jest.Mock).mockImplementation(
+        (id: string, handler: Function) => {
+          if (id === commandId) {
+            captured = handler;
+          }
+          return { dispose: jest.fn() };
+        }
+      );
+      await activate(createMockContext());
+      if (!captured) {
+        throw new Error(`${commandId} not registered`);
+      }
+      return captured;
+    }
+
+    beforeEach(() => {
+      const { clearNwcUri, getNwcStatus } = require('./api/nwc.api');
+      (clearNwcUri as jest.Mock).mockClear().mockResolvedValue(true);
+      (getNwcStatus as jest.Mock).mockClear();
+      (vscode.window.showWarningMessage as jest.Mock).mockReset();
+      (vscode.window.showInformationMessage as jest.Mock).mockClear();
+    });
+
+    it('no-ops when no wallet is configured', async () => {
+      const { getNwcStatus, clearNwcUri } = require('./api/nwc.api');
+      (getNwcStatus as jest.Mock).mockResolvedValue({ configured: false });
+
+      const handler = await captureHandler('sattest.disconnectWallet');
+      await handler();
+
+      expect(clearNwcUri).not.toHaveBeenCalled();
+      expect(vscode.window.showInformationMessage).toHaveBeenCalledWith(
+        expect.stringContaining('No Lightning wallet')
+      );
+    });
+
+    it('aborts when user cancels the confirmation', async () => {
+      const { getNwcStatus, clearNwcUri } = require('./api/nwc.api');
+      (getNwcStatus as jest.Mock).mockResolvedValue({ configured: true });
+      (vscode.window.showWarningMessage as jest.Mock).mockResolvedValue(undefined);
+
+      const handler = await captureHandler('sattest.disconnectWallet');
+      await handler();
+
+      expect(clearNwcUri).not.toHaveBeenCalled();
+    });
+
+    it('disconnects and toasts on success', async () => {
+      const { getNwcStatus, clearNwcUri } = require('./api/nwc.api');
+      (getNwcStatus as jest.Mock).mockResolvedValue({ configured: true });
+      (vscode.window.showWarningMessage as jest.Mock).mockResolvedValue('Disconnect');
+
+      const handler = await captureHandler('sattest.disconnectWallet');
+      await handler();
+
+      expect(clearNwcUri).toHaveBeenCalled();
+      expect(vscode.window.showInformationMessage).toHaveBeenCalledWith(
+        expect.stringContaining('disconnected')
+      );
+    });
+
+    it('skips success toast when clearNwcUri returns false', async () => {
+      const { getNwcStatus, clearNwcUri } = require('./api/nwc.api');
+      (getNwcStatus as jest.Mock).mockResolvedValue({ configured: true });
+      (vscode.window.showWarningMessage as jest.Mock).mockResolvedValue('Disconnect');
+      (clearNwcUri as jest.Mock).mockResolvedValueOnce(false);
+
+      const handler = await captureHandler('sattest.disconnectWallet');
+      await handler();
+
+      expect(vscode.window.showInformationMessage).not.toHaveBeenCalledWith(
+        expect.stringContaining('disconnected')
+      );
     });
   });
 

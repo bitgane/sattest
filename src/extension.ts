@@ -13,6 +13,7 @@ import { findTestItemById, getRepoSlug, getLocalTestIds } from './test/test-item
 import { activateTestController, myTestController } from './test/test-controller.js';
 import { CustomTestItem } from './test/test-item-wrapper.js';
 import { connectNostr } from './api/nostr.api.js';
+import { clearNwcUri, getNwcStatus, setNwcUri } from './api/nwc.api.js';
 import { getNostrUserPubkey, initializeSecrets } from './state.js';
 import { SUPPORTED_LANGUAGE_IDS } from './test/language-configs.js';
 
@@ -53,6 +54,100 @@ export async function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.commands.registerCommand('sattest.connectNostr', async () => {
       await connectNostr(context, onBountiesChangedEmitter);
+    })
+  );
+
+  // NWC (Nostr Wallet Connect) — lets the creator connect their own
+  // Lightning wallet so new bounties can be funded non-custodially. The URI
+  // is a secret: it's sent to the backend exactly once (PATCH /users/me/nwc)
+  // and never displayed afterwards.
+  context.subscriptions.push(
+    vscode.commands.registerCommand('sattest.connectWallet', async () => {
+      const userNostrPubkey = await getNostrUserPubkey();
+      if (!userNostrPubkey) {
+        vscode.window.showErrorMessage(
+          'Connect to Nostr first (Ctrl/Cmd+Alt+N), then link your wallet.'
+        );
+        return;
+      }
+      const uri = await vscode.window.showInputBox({
+        title: 'Connect Lightning Wallet (NIP-47)',
+        prompt: 'Paste your NWC connection string from Alby Hub, Mutiny, Coinos, etc.',
+        placeHolder: 'nostr+walletconnect://...',
+        password: true,
+        ignoreFocusOut: true,
+        validateInput: (v) =>
+          v.trim().startsWith('nostr+walletconnect://')
+            ? null
+            : 'Expected a nostr+walletconnect:// URI',
+      });
+      if (!uri) {
+        return;
+      }
+
+      // Budget window is informational — the real limit lives in the
+      // creator's wallet. We surface it in the UI for reassurance.
+      const windowChoice = await vscode.window.showQuickPick(
+        [
+          { label: 'Daily budget window', value: 'daily' as const },
+          { label: 'Weekly budget window', value: 'weekly' as const },
+          { label: 'Monthly budget window', value: 'monthly' as const },
+          { label: 'Skip — set in my wallet app', value: undefined },
+        ],
+        { title: 'Budget window (optional, display only)', ignoreFocusOut: true }
+      );
+      if (windowChoice === undefined) {
+        return; // user dismissed the quick pick
+      }
+
+      let budgetSats: number | undefined;
+      if (windowChoice.value) {
+        const satsInput = await vscode.window.showInputBox({
+          title: `Budget per ${windowChoice.value} window`,
+          prompt: 'Sats (display only — enforced by your wallet)',
+          placeHolder: 'e.g. 100000',
+          validateInput: (v) => {
+            if (!v.trim()) {
+              return null; // allow skip
+            }
+            return /^\d+$/.test(v.trim()) && Number(v.trim()) > 0
+              ? null
+              : 'Enter a positive whole number or leave blank';
+          },
+        });
+        if (satsInput && satsInput.trim()) {
+          budgetSats = Number(satsInput.trim());
+        }
+      }
+
+      const ok = await setNwcUri(uri.trim(), budgetSats, windowChoice.value);
+      if (ok) {
+        vscode.window.showInformationMessage(
+          '✅ Lightning wallet connected. New bounties can now be funded non-custodially.'
+        );
+      }
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('sattest.disconnectWallet', async () => {
+      const status = await getNwcStatus();
+      if (!status.configured) {
+        vscode.window.showInformationMessage('No Lightning wallet is currently connected.');
+        return;
+      }
+      const confirm = await vscode.window.showWarningMessage(
+        'Disconnect your Lightning wallet? Existing non-custodial bounties will fail to pay out on approval until you reconnect.',
+        { modal: true },
+        'Disconnect'
+      );
+      if (confirm !== 'Disconnect') {
+        return;
+      }
+      const ok = await clearNwcUri();
+      if (ok) {
+        vscode.window.showInformationMessage('Lightning wallet disconnected.');
+      }
     })
   );
 

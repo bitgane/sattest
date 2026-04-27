@@ -12,6 +12,13 @@ export interface FetchBountiesOptions {
   testIds?: string[];
 }
 
+// Extension activation fires multiple fetchBounties() calls in quick
+// succession (initial load + post-Test-Controller refresh). If the backend
+// is unreachable we don't want to spam the user with one toast per call —
+// track the last time we surfaced an error so we only toast once per window.
+let lastFetchErrorToastAt = 0;
+const FETCH_ERROR_TOAST_COOLDOWN_MS = 10_000;
+
 export async function fetchBounties(options: FetchBountiesOptions = {}): Promise<BountyInfo[]> {
   const { testId, includeInactive = false, repo, testIds } = options;
   try {
@@ -55,7 +62,11 @@ export async function fetchBounties(options: FetchBountiesOptions = {}): Promise
     return backendBounties;
   } catch (error) {
     console.error('[fetchBounties] Error fetching bounties:', error);
-    vscode.window.showErrorMessage('Failed to load bounties from backend');
+    const now = Date.now();
+    if (now - lastFetchErrorToastAt > FETCH_ERROR_TOAST_COOLDOWN_MS) {
+      lastFetchErrorToastAt = now;
+      vscode.window.showErrorMessage('Failed to load bounties from backend');
+    }
     return [];
   }
 }
@@ -67,13 +78,16 @@ export async function createBounty(
   lnbitsApiKey: string | undefined,
   test: vscode.TestItem,
   creatorId: string | undefined,
-  repo?: string
+  repo?: string,
+  fundingMode: 'custodial' | 'nwc' = 'custodial'
 ): Promise<BountyInfo | undefined> {
   try {
     let invoiceForApi = '';
     let paymentHashForApi = '';
     const memo = `Bounty for test "${test.label}"`;
-    if (!lnbitsUrl && lnbitsApiKey) {
+    // NWC bounties are funded from the creator's own wallet on approval, so
+    // there's no up-front LNbits invoice to mint.
+    if (fundingMode === 'custodial' && !lnbitsUrl && lnbitsApiKey) {
       const { payment_request: invoice, payment_hash } = await createLnbitsInvoice(
         lnbitsUrl as string,
         lnbitsApiKey as string,
@@ -98,6 +112,9 @@ export async function createBounty(
         // backend serve per-repo listings to unauthenticated clients. Omitted
         // when the workspace has no configured git remote.
         ...(repo ? { repo } : {}),
+        // Only forward a non-default fundingMode — keeps the wire format
+        // backward-compatible with older backends that don't know the field.
+        ...(fundingMode !== 'custodial' ? { fundingMode } : {}),
       }),
     });
     if (!response.ok) {
@@ -211,33 +228,69 @@ export async function claimBountyWithLnAddress(
   }
 }
 
+export interface DeactivateBountyResult {
+  success: boolean;
+  refund?: { checkingId: string; amountSats: number };
+}
+
 /**
- * Deactivates (soft-deletes) a bounty by setting active = false.
+ * Deactivates a bounty. If `refundLnurl` is supplied, the backend  will 
+ * also fire a refund payout to that LNURL/LN-address before deactivating.
  * @param bountyId - The bounty UUID
- * @returns true if successful
+ * @param refundLnurl - Optional LNURL/LN-address to refund the funded amount to
+ * @returns { success, refund? } — `refund` populated only when a payout fired
  */
-export async function deactivateBounty(bountyId: string): Promise<boolean> {
+export async function deactivateBounty(
+  bountyId: string,
+  refundLnurl?: string
+): Promise<DeactivateBountyResult> {
   try {
+    const init: RequestInit = {
+      method: 'PATCH',
+      headers: await getNostrAuthHeaders({ 'Content-Type': 'application/json' }),
+    };
+    if (refundLnurl) {
+      init.body = JSON.stringify({ refundLnurl });
+    }
+
     const response = await fetch(
       `${getBackendUrl()}/bounties/${encodeURIComponent(bountyId)}/deactivate`,
-      {
-        method: 'PATCH',
-        headers: await getNostrAuthHeaders({ 'Content-Type': 'application/json' }),
-      }
+      init
     );
 
     if (!response.ok) {
-      const errorText = await response.text().catch(() => 'Unknown error');
-      throw new Error(`Deactivation failed: ${response.status} - ${errorText}`);
+      let errorMessage = `Deactivation failed: ${response.status}`;
+      try {
+        const errorData = await response.json();
+        // Prefer the dev-mode `message` (real exception text) over the
+        // generic `error` ("Failed to deactivate bounty") so the user
+        // actually sees what went wrong instead of a tautology.
+        const detail =
+          errorData.message && errorData.message !== 'Internal server error'
+            ? `${errorData.error}: ${errorData.message}`
+            : errorData.error || errorData.message;
+        errorMessage = detail || errorMessage;
+      } catch {
+        /* body wasn't JSON */
+      }
+      throw new Error(errorMessage);
     }
 
-    return true;
+    const data = (await response.json().catch(() => ({}))) as {
+      success?: boolean;
+      refund?: { checkingId: string; amountSats: number };
+    };
+
+    return {
+      success: data.success ?? true,
+      refund: data.refund,
+    };
   } catch (error) {
     console.error('[deactivateBounty] Error:', error);
     vscode.window.showErrorMessage(
       `Failed to deactivate bounty: ${error instanceof Error ? error.message : 'Unknown error'}`
     );
-    return false;
+    return { success: false };
   }
 }
 

@@ -47,6 +47,13 @@ jest.mock('../api/lnbits.api', () => ({
   configureLnbits: jest.fn().mockResolvedValue(undefined),
 }));
 
+jest.mock('../api/nwc.api', () => ({
+  // Default: no wallet connected — preserves existing tests' custodial path.
+  getNwcStatus: jest.fn().mockResolvedValue({ configured: false }),
+  setNwcUri: jest.fn(),
+  clearNwcUri: jest.fn(),
+}));
+
 jest.mock('../api/bounty.api', () => ({
   createBounty: jest.fn(),
   checkPaidStatus: jest.fn(),
@@ -291,6 +298,84 @@ describe('addBountyCommand', () => {
 
     expect(setBountyCreator).toHaveBeenCalledWith('bounty-uuid', 'new-pubkey');
   });
+
+  // ── NWC (non-custodial) path ────────────────────────────────────────────
+  it('non-custodial: skips QR panel and forwards fundingMode=nwc', async () => {
+    const mockContext = createMockContext();
+    const mockTestItem = createMockTestItem({ id: 'test-nwc' });
+    const { getNwcStatus } = require('../api/nwc.api');
+
+    (vscode.window.showInputBox as jest.Mock).mockResolvedValueOnce('7777');
+    (getNwcStatus as jest.Mock).mockResolvedValue({ configured: true });
+    // showQuickPick is what addBountyCommand uses to pick the funding mode.
+    (vscode.window as any).showQuickPick = jest
+      .fn()
+      .mockResolvedValueOnce({ value: 'nwc' });
+
+    (createBountyApi as jest.Mock).mockResolvedValue({
+      id: 'bounty-uuid',
+      testId: 'test-nwc',
+      amountSats: 7777,
+      fundingMode: 'nwc',
+      // NWC bounties carry no invoice / paymentHash
+    });
+
+    addBountyCommand(bounties, mockEmitter as any, mockContext);
+    await capturedHandler!(mockTestItem);
+
+    expect(bounties.size).toBe(1);
+    // 7th positional arg is fundingMode
+    const args = (createBountyApi as jest.Mock).mock.calls[0];
+    expect(args[6]).toBe('nwc');
+    // No QR webview opened — that helper would call createWebviewPanel.
+    expect(vscode.window.createWebviewPanel).not.toHaveBeenCalled();
+    expect(vscode.window.showInformationMessage).toHaveBeenCalledWith(
+      expect.stringContaining('connected wallet')
+    );
+  });
+
+  it('non-custodial: user cancels mode pick → no bounty created', async () => {
+    const mockContext = createMockContext();
+    const { getNwcStatus } = require('../api/nwc.api');
+
+    (vscode.window.showInputBox as jest.Mock).mockResolvedValueOnce('7777');
+    (getNwcStatus as jest.Mock).mockResolvedValue({ configured: true });
+    (vscode.window as any).showQuickPick = jest.fn().mockResolvedValueOnce(undefined);
+
+    addBountyCommand(bounties, mockEmitter as any, mockContext);
+    await capturedHandler!(createMockTestItem({ id: 'test-cancel' }));
+
+    expect(createBountyApi).not.toHaveBeenCalled();
+    expect(bounties.size).toBe(0);
+  });
+
+  it('NWC configured + user picks custodial: keeps existing QR flow', async () => {
+    const mockContext = createMockContext();
+    const mockTestItem = createMockTestItem({ id: 'test-cust' });
+    const { getNwcStatus } = require('../api/nwc.api');
+
+    (vscode.window.showInputBox as jest.Mock).mockResolvedValueOnce('1234');
+    (getNwcStatus as jest.Mock).mockResolvedValue({ configured: true });
+    (vscode.window as any).showQuickPick = jest
+      .fn()
+      .mockResolvedValueOnce({ value: 'custodial' });
+
+    (createBountyApi as jest.Mock).mockResolvedValue({
+      id: 'bounty-uuid',
+      testId: 'test-cust',
+      amountSats: 1234,
+      invoice: 'lnbc...',
+      paymentHash: 'hash',
+    });
+
+    addBountyCommand(bounties, mockEmitter as any, mockContext);
+    await capturedHandler!(mockTestItem);
+
+    const args = (createBountyApi as jest.Mock).mock.calls[0];
+    expect(args[6]).toBe('custodial');
+    // QR panel opened for custodial path
+    expect(vscode.window.createWebviewPanel).toHaveBeenCalled();
+  });
 });
 
 describe('removeBountyCommand', () => {
@@ -344,13 +429,15 @@ describe('removeBountyCommand', () => {
     const mockContext = createMockContext();
 
     (vscode.window.showWarningMessage as jest.Mock).mockResolvedValue('Yes, Remove');
-    (deactivateBounty as jest.Mock).mockResolvedValue(true);
+    (deactivateBounty as jest.Mock).mockResolvedValue({ success: true });
 
     removeBountyCommand(bounties, mockEmitter, mockContext);
     await capturedHandler!(createMockTestItem({ id: 'test-id' }));
 
     expect(bounties.size).toBe(0);
     expect(mockEmitter.fire).toHaveBeenCalled();
+    // Unpaid bounty → no LNURL prompt, API called with a single arg
+    expect(deactivateBounty).toHaveBeenCalledWith('bounty-uuid', undefined);
     expect(vscode.window.showInformationMessage).toHaveBeenCalledWith(
       expect.stringContaining('Bounty removed')
     );
@@ -435,12 +522,144 @@ describe('removeBountyCommand', () => {
     const mockContext = createMockContext();
 
     (vscode.window.showWarningMessage as jest.Mock).mockResolvedValue('Yes, Remove');
-    (deactivateBounty as jest.Mock).mockResolvedValue(false);
+    (deactivateBounty as jest.Mock).mockResolvedValue({ success: false });
 
     removeBountyCommand(bounties, mockEmitter, mockContext);
     await capturedHandler!(createMockTestItem({ id: 'test-id' }));
 
     expect(bounties.size).toBe(1);
+  });
+
+  // ── Refund flow ──────────────────────────────────────────────────────────
+  function paidBounty(overrides: Partial<BountyInfo> = {}): BountyInfo {
+    return {
+      id: 'bounty-uuid',
+      amountSats: 1000,
+      invoicePaid: true,
+      testId: 'test-id',
+      creatorId: 'creator-pubkey',
+      claims: [] as ClaimInfo[],
+      ...overrides,
+    } as BountyInfo;
+  }
+
+  it('paid bounty: prompts for LNURL and passes it to API on success', async () => {
+    const bounties = new Map<string, BountyInfo>();
+    bounties.set('test-id', paidBounty());
+    const mockEmitter = { fire: jest.fn() } as any;
+    const mockContext = createMockContext();
+
+    (vscode.window.showWarningMessage as jest.Mock).mockResolvedValueOnce('Yes, Remove');
+    (vscode.window.showInputBox as jest.Mock).mockResolvedValueOnce('alice@primal.net');
+    (deactivateBounty as jest.Mock).mockResolvedValue({
+      success: true,
+      refund: { checkingId: 'chk-1', amountSats: 1000 },
+    });
+
+    removeBountyCommand(bounties, mockEmitter, mockContext);
+    await capturedHandler!(createMockTestItem({ id: 'test-id' }));
+
+    expect(vscode.window.showInputBox).toHaveBeenCalledWith(
+      expect.objectContaining({ title: expect.stringContaining('Refund 1000 sats') })
+    );
+    expect(deactivateBounty).toHaveBeenCalledWith('bounty-uuid', 'alice@primal.net');
+    expect(bounties.size).toBe(0);
+    expect(vscode.window.showInformationMessage).toHaveBeenCalledWith(
+      expect.stringContaining('Refunded 1000 sats')
+    );
+  });
+
+  it('paid bounty with pending claim: shows extra warning; declining aborts', async () => {
+    const bounties = new Map<string, BountyInfo>();
+    bounties.set('test-id', paidBounty({ claims: [{ status: 'pending' } as ClaimInfo] }));
+    const mockEmitter = { fire: jest.fn() } as any;
+    const mockContext = createMockContext();
+
+    (vscode.window.showWarningMessage as jest.Mock)
+      .mockResolvedValueOnce('Yes, Remove') // initial confirm
+      .mockResolvedValueOnce(undefined); // pending-claim warning declined
+
+    removeBountyCommand(bounties, mockEmitter, mockContext);
+    await capturedHandler!(createMockTestItem({ id: 'test-id' }));
+
+    expect(deactivateBounty).not.toHaveBeenCalled();
+    expect(vscode.window.showInputBox).not.toHaveBeenCalled();
+    expect(bounties.size).toBe(1);
+  });
+
+  it('paid bounty: cancelling LNURL prompt aborts without API call', async () => {
+    const bounties = new Map<string, BountyInfo>();
+    bounties.set('test-id', paidBounty());
+    const mockEmitter = { fire: jest.fn() } as any;
+    const mockContext = createMockContext();
+
+    (vscode.window.showWarningMessage as jest.Mock).mockResolvedValueOnce('Yes, Remove');
+    (vscode.window.showInputBox as jest.Mock).mockResolvedValueOnce(undefined);
+
+    removeBountyCommand(bounties, mockEmitter, mockContext);
+    await capturedHandler!(createMockTestItem({ id: 'test-id' }));
+
+    expect(deactivateBounty).not.toHaveBeenCalled();
+    expect(bounties.size).toBe(1);
+  });
+
+  it('approved bounty: skips LNURL prompt (nothing to refund)', async () => {
+    const bounties = new Map<string, BountyInfo>();
+    bounties.set(
+      'test-id',
+      paidBounty({ claims: [{ status: 'approved' } as ClaimInfo] })
+    );
+    const mockEmitter = { fire: jest.fn() } as any;
+    const mockContext = createMockContext();
+
+    (vscode.window.showWarningMessage as jest.Mock).mockResolvedValueOnce('Yes, Remove');
+    (deactivateBounty as jest.Mock).mockResolvedValue({ success: true });
+
+    removeBountyCommand(bounties, mockEmitter, mockContext);
+    await capturedHandler!(createMockTestItem({ id: 'test-id' }));
+
+    expect(vscode.window.showInputBox).not.toHaveBeenCalled();
+    expect(deactivateBounty).toHaveBeenCalledWith('bounty-uuid', undefined);
+  });
+
+  it('NWC bounty: skips LNURL prompt even when invoicePaid=true (no custody)', async () => {
+    // The backend marks NWC bounties invoicePaid=true on creation (nothing
+    // to fund), but they're never refundable here — sats live in the
+    // creator's own wallet, untouched until approval.
+    const bounties = new Map<string, BountyInfo>();
+    bounties.set(
+      'test-id',
+      paidBounty({ fundingMode: 'nwc', invoice: undefined, paymentHash: undefined })
+    );
+    const mockEmitter = { fire: jest.fn() } as any;
+    const mockContext = createMockContext();
+
+    (vscode.window.showWarningMessage as jest.Mock).mockResolvedValueOnce('Yes, Remove');
+    (deactivateBounty as jest.Mock).mockResolvedValue({ success: true });
+
+    removeBountyCommand(bounties, mockEmitter, mockContext);
+    await capturedHandler!(createMockTestItem({ id: 'test-id' }));
+
+    expect(vscode.window.showInputBox).not.toHaveBeenCalled();
+    expect(deactivateBounty).toHaveBeenCalledWith('bounty-uuid', undefined);
+    expect(bounties.size).toBe(0);
+  });
+
+  it('paid bounty: API failure leaves local state intact', async () => {
+    const bounties = new Map<string, BountyInfo>();
+    bounties.set('test-id', paidBounty());
+    const mockEmitter = { fire: jest.fn() } as any;
+    const mockContext = createMockContext();
+
+    (vscode.window.showWarningMessage as jest.Mock).mockResolvedValueOnce('Yes, Remove');
+    (vscode.window.showInputBox as jest.Mock).mockResolvedValueOnce('alice@primal.net');
+    (deactivateBounty as jest.Mock).mockResolvedValue({ success: false });
+
+    removeBountyCommand(bounties, mockEmitter, mockContext);
+    await capturedHandler!(createMockTestItem({ id: 'test-id' }));
+
+    expect(bounties.size).toBe(1);
+    expect(mockEmitter.fire).not.toHaveBeenCalled();
   });
 });
 
