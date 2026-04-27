@@ -3,7 +3,10 @@ import { CustomTestItem } from '../test/test-item-wrapper.js';
 export interface BountyInfo {
   id: string;
   amountSats: number;
-  invoice: string;
+  // `invoice` and `paymentHash` are absent on non-custodial (NWC) bounties —
+  // those are funded from the creator's own wallet on approval, so there's
+  // no up-front invoice to display or poll.
+  invoice?: string;
   paymentHash?: string; // From LNbits response
   createdAt: Date;
   creatorId: string; // nostr pubkey
@@ -13,7 +16,14 @@ export interface BountyInfo {
   claims: ClaimInfo[];
   claimedBy?: string; // claimer's invoice or address
   active: boolean;
+  /**
+   * How this bounty is funded. `custodial` (default) routes through LNbits.
+   * `nwc` funds from the creator's own wallet via NIP-47 on approval.
+   */
+  fundingMode?: FundingMode;
 }
+
+export type FundingMode = 'custodial' | 'nwc';
 
 /**
  * Represents a claim on a bounty in the system.

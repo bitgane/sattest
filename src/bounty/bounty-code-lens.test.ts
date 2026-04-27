@@ -57,6 +57,63 @@ describe('BountyCodeLensProvider', () => {
       expect(lenses).toEqual([]);
     });
 
+    it('skips bounties whose test item is not in the test controller yet', () => {
+      // findTestItemById returns undefined when the test was deleted, renamed,
+      // or hasn't been discovered — we silently skip those.
+      (findTestItemById as jest.Mock).mockReturnValue(undefined);
+      bounties.set('missing-test', createBounty());
+      provider = new BountyCodeLensProvider(bounties, emitter, undefined);
+
+      const lenses = provider.provideCodeLenses(createMockDocument()) as vscode.CodeLens[];
+      expect(lenses).toEqual([]);
+    });
+
+    it('appends "Non-custodial" badge when fundingMode is nwc', () => {
+      const uri = vscode.Uri.file('/mock/workspace/foo.test.ts');
+      const mockItem = {
+        id: 'test-1',
+        label: 'my test',
+        uri,
+        range: new vscode.Range(5, 0, 5, 10),
+        children: [],
+      };
+      (findTestItemById as jest.Mock).mockReturnValue(mockItem);
+
+      bounties.set(
+        'test-1',
+        createBounty({ invoicePaid: true, paymentHash: 'hash', fundingMode: 'nwc' })
+      );
+      provider = new BountyCodeLensProvider(bounties, emitter, undefined);
+
+      const lenses = provider.provideCodeLenses(createMockDocument()) as vscode.CodeLens[];
+      const fundedLens = lenses.find((l) => l.command?.title.includes('Funded'));
+      expect(fundedLens?.command?.title).toContain('Non-custodial');
+      expect(fundedLens?.command?.tooltip).toMatch(/non-custodial/);
+    });
+
+    it('fires onDidChangeCodeLenses when the bounty emitter fires', () => {
+      provider = new BountyCodeLensProvider(bounties, emitter, undefined);
+      const fired = jest.fn();
+      provider._onDidChangeCodeLenses.event = fired as any;
+      // The constructor wired emitter.event(...) — invoke the captured listener.
+      const listener = (emitter.event as jest.Mock).mock.calls[0][0];
+      const fireSpy = jest.spyOn(provider._onDidChangeCodeLenses, 'fire');
+      listener();
+      expect(fireSpy).toHaveBeenCalled();
+    });
+  });
+
+  describe('resolveCodeLens (extra)', () => {
+    it('returns the codeLens unchanged even when token is non-trivial', () => {
+      provider = new BountyCodeLensProvider(bounties, emitter, undefined);
+      const lens = new vscode.CodeLens(new vscode.Range(0, 0, 0, 0), {
+        title: 'x',
+        command: '',
+      });
+      const token = { isCancellationRequested: false } as vscode.CancellationToken;
+      expect(provider.resolveCodeLens!(lens, token)).toBe(lens);
+    });
+
     it('skips bounties for different documents', () => {
       const mockItem = {
         id: 'test-1',

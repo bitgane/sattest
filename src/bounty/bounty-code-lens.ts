@@ -22,8 +22,6 @@ export class BountyCodeLensProvider implements vscode.CodeLensProvider {
 
     // Listen to bounty changes → trigger CodeLens refresh
     this.onBountiesChangedEmitter.event(() => {
-      if (process.env.NODE_ENV === 'development') {
-      }
       this._onDidChangeCodeLenses.fire();
     });
   }
@@ -32,9 +30,8 @@ export class BountyCodeLensProvider implements vscode.CodeLensProvider {
     document: vscode.TextDocument
   ): vscode.CodeLens[] | Thenable<vscode.CodeLens[]> {
     const lenses: vscode.CodeLens[] = [];
-    let foundAny = false;
     for (const [testId, bounty] of this.bounties.entries()) {
-      let item = findTestItemById(testId);
+      const item = findTestItemById(testId);
 
       if (!item) {
         continue;
@@ -45,32 +42,41 @@ export class BountyCodeLensProvider implements vscode.CodeLensProvider {
       if (!bounty.active) {
         continue;
       }
-      if (!item.range) {
-      }
+      // Some lazily-resolved test items don't have a range yet (e.g. they were
+      // discovered from a folder watcher before the file was parsed). Anchor
+      // the lens at the top of the document so the user still sees it.
       const effectiveRange = item.range ?? new vscode.Range(0, 0, 0, 0);
-
-      foundAny = true;
 
       let title = '';
       let command = '';
       let tooltip = '';
       const claimStatus = bounty.claims?.[0]?.status;
+      const isNwc = bounty.fundingMode === 'nwc';
+      // Tag non-custodial bounties so the creator and potential claimers can
+      // see at a glance that sats live in the creator's own wallet, not our
+      // LNbits host.
+      const badge = isNwc ? ' · Non-custodial' : '';
 
       if (claimStatus === claimStatusPending) {
-        title = `💰 Claim Pending (${bounty.amountSats} sats)`;
+        title = `💰 Claim Pending (${bounty.amountSats} sats)${badge}`;
         command = ''; // add a "View Claim Status" command later
         tooltip = 'Waiting for creator approval';
       } else if (claimStatus === claimStatusApproved) {
-        title = `💰 Claim Approved – Payout Sent (${bounty.amountSats} sats)`;
+        title = `💰 Claim Approved – Payout Sent (${bounty.amountSats} sats)${badge}`;
       } else if (bounty.invoicePaid) {
-        title = `💰 Funded – Claimable (${bounty.amountSats} sats)`;
+        title = `💰 Funded – Claimable (${bounty.amountSats} sats)${badge}`;
         command = 'sattest.claimBounty';
-        tooltip = 'Click to claim bounty payout';
+        tooltip = isNwc
+          ? 'Click to claim bounty payout (non-custodial — funded from creator wallet on approval)'
+          : 'Click to claim bounty payout';
       } else if (bounty.paymentHash) {
         title = `💰 Awaiting Funding (${bounty.amountSats} sats)`;
         command = 'sattest.checkPaid';
         tooltip = 'Check if bounty has been funded';
       } else {
+        // NWC bounties with invoicePaid=false shouldn't happen (backend sets
+        // it true on creation) but guard anyway so we don't render a broken
+        // "Awaiting Funding" lens that polls a non-existent paymentHash.
         continue;
       }
 
@@ -99,18 +105,8 @@ export class BountyCodeLensProvider implements vscode.CodeLensProvider {
         );
       }
 
-      if (!bounty.active) {
-        const addLens = new vscode.CodeLens(effectiveRange, {
-          title: '➕ Add Bounty',
-          command: 'sattest.addBounty',
-          arguments: [item],
-          tooltip: 'Add a Lightning bounty to this test',
-        });
-        lenses.push(addLens);
-      }
-
       if (
-        (bounty && bounty.active && !bounty.invoicePaid) ||
+        (bounty.active && !bounty.invoicePaid) ||
         bounty.creatorId === this.userNostrPubkey
       ) {
         const removeLens = new vscode.CodeLens(effectiveRange, {
@@ -123,25 +119,13 @@ export class BountyCodeLensProvider implements vscode.CodeLensProvider {
       }
     }
 
-    if (!foundAny) {
-      if (process.env.NODE_ENV === 'development') {
-        console.debug('[BountyCodeLens] No lenses generated for:', document.uri.fsPath);
-      }
-    }
     return lenses;
   }
 
   resolveCodeLens?(
     codeLens: vscode.CodeLens,
-    token: vscode.CancellationToken
+    _token: vscode.CancellationToken
   ): vscode.CodeLens | Thenable<vscode.CodeLens> | undefined {
     return codeLens;
-  }
-
-  private collectChildren(item: vscode.TestItem, items: vscode.TestItem[]) {
-    item.children.forEach((child) => {
-      items.push(child);
-      this.collectChildren(child, items);
-    });
   }
 }

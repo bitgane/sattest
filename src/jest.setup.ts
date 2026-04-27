@@ -139,6 +139,7 @@ jest.mock('vscode', () => {
     window: {
       showInformationMessage: jest.fn().mockResolvedValue(undefined),
       showInputBox: jest.fn().mockResolvedValue(undefined),
+      showQuickPick: jest.fn().mockResolvedValue(undefined),
       showErrorMessage: jest.fn().mockResolvedValue(undefined),
       showWarningMessage: jest.fn().mockResolvedValue(undefined),
       visibleTextEditors: [],

@@ -11,6 +11,10 @@ import {
 } from './test-item.util.js';
 import { myTestController } from './test-controller.js';
 
+jest.mock('child_process', () => ({
+  execSync: jest.fn(),
+}));
+
 // We need to mock the test-controller module before importing test-item.util
 jest.mock('./test-controller', () => {
   const items = new Map();
@@ -225,6 +229,63 @@ describe('parseRepoSlug', () => {
 
   it('returns empty string for unrecognized format', () => {
     expect(parseRepoSlug('not-a-url')).toBe('');
+  });
+});
+
+describe('getRepoSlug', () => {
+  // getRepoSlug memoizes — re-import per test to clear the cache.
+  let getRepoSlug: typeof import('./test-item.util.js').getRepoSlug;
+  let execSync: jest.Mock;
+
+  beforeEach(() => {
+    jest.resetModules();
+    jest.doMock('child_process', () => ({ execSync: jest.fn() }));
+    jest.doMock('./test-controller', () => ({
+      myTestController: { items: { forEach: jest.fn(), get size() { return 0; } } },
+    }));
+    getRepoSlug = require('./test-item.util.js').getRepoSlug;
+    execSync = require('child_process').execSync;
+  });
+
+  it('returns slug parsed from `git remote get-url origin`', () => {
+    execSync.mockReturnValue('git@github.com:bitgane/sattest.git\n');
+    expect(getRepoSlug()).toBe('bitgane/sattest');
+  });
+
+  it('memoizes the result — second call does not re-shell', () => {
+    execSync.mockReturnValue('git@github.com:owner/repo.git\n');
+    expect(getRepoSlug()).toBe('owner/repo');
+    execSync.mockClear();
+    expect(getRepoSlug()).toBe('owner/repo');
+    expect(execSync).not.toHaveBeenCalled();
+  });
+
+  it('returns undefined when git is unavailable', () => {
+    execSync.mockImplementation(() => {
+      throw new Error('not a git repo');
+    });
+    expect(getRepoSlug()).toBeUndefined();
+  });
+
+  it('memoizes the failure — second call does not re-shell', () => {
+    execSync.mockImplementation(() => {
+      throw new Error('not a git repo');
+    });
+    expect(getRepoSlug()).toBeUndefined();
+    execSync.mockClear();
+    expect(getRepoSlug()).toBeUndefined();
+    expect(execSync).not.toHaveBeenCalled();
+  });
+
+  it('returns undefined when there is no workspace root', () => {
+    const originalFolders = (require('vscode') as typeof import('vscode')).workspace.workspaceFolders;
+    ((require('vscode') as any).workspace).workspaceFolders = undefined;
+    try {
+      expect(getRepoSlug()).toBeUndefined();
+      expect(execSync).not.toHaveBeenCalled();
+    } finally {
+      ((require('vscode') as any).workspace).workspaceFolders = originalFolders;
+    }
   });
 });
 

@@ -25,6 +25,8 @@ import {
   setIsDefaultLnbits,
 } from '../state.js';
 import { configureLnbits, getLnbitsConfig } from '../api/lnbits.api.js';
+import { promptForLnurl } from './lnurl-input.js';
+import { getNwcStatus } from '../api/nwc.api.js';
 
 function escapeHtml(s: string): string {
   return s
@@ -92,29 +94,61 @@ export const addBountyCommand = (
         return;
       }
 
-      const isDefaultLnbits = await getIsDefaultLnbits();
-      let userLnbitsConfig = await getLnbitsConfig();
-
-      if (!isDefaultLnbits) {
-        // First time – offer choice
-        const choice = await vscode.window.showInformationMessage(
-          'Bounty actions use our default LNbits node by default.',
-          'Use default (easiest)',
-          'Use my own LNbits'
+      // Decide the funding path up front. If the creator has connected a
+      // Lightning wallet via NWC, offer them the non-custodial option; sats
+      // move straight from their wallet to the claimer on approval, skipping
+      // our LNbits custody entirely. Default is custodial (today's behavior).
+      let fundingMode: 'custodial' | 'nwc' = 'custodial';
+      const nwcStatus = await getNwcStatus();
+      if (nwcStatus.configured) {
+        const choice = await vscode.window.showQuickPick(
+          [
+            {
+              label: 'Fund from connected Lightning wallet (non-custodial)',
+              description: 'Sats move from your wallet on approval — no invoice to pay now',
+              value: 'nwc' as const,
+            },
+            {
+              label: 'Fund via Lightning invoice (custodial)',
+              description: 'Pay an invoice up-front; sats held until approval',
+              value: 'custodial' as const,
+            },
+          ],
+          { title: 'How should this bounty be funded?', ignoreFocusOut: true }
         );
-        if (choice === 'Use my own LNbits') {
-          await configureLnbits();
-          // Re-fetch config after user sets it
-          userLnbitsConfig = await getLnbitsConfig();
-
-          if (!userLnbitsConfig?.url || !userLnbitsConfig?.apiKey) {
-            vscode.window.showInformationMessage(
-              `Lnbits info is required to manage bounties and claims. Add new bounty to choose the default or your own.`
-            );
-            return;
-          }
+        if (!choice) {
+          return;
         }
-        await setIsDefaultLnbits((!userLnbitsConfig).toString());
+        fundingMode = choice.value;
+      }
+
+      // Custodial bounties still need an LNbits config choice. NWC bounties
+      // skip this entirely — no invoice is minted.
+      let userLnbitsConfig = await getLnbitsConfig();
+      if (fundingMode === 'custodial') {
+        const isDefaultLnbits = await getIsDefaultLnbits();
+
+        if (!isDefaultLnbits) {
+          // First time – offer choice
+          const choice = await vscode.window.showInformationMessage(
+            'Bounty actions use our default LNbits node by default.',
+            'Use default (easiest)',
+            'Use my own LNbits'
+          );
+          if (choice === 'Use my own LNbits') {
+            await configureLnbits();
+            // Re-fetch config after user sets it
+            userLnbitsConfig = await getLnbitsConfig();
+
+            if (!userLnbitsConfig?.url || !userLnbitsConfig?.apiKey) {
+              vscode.window.showInformationMessage(
+                `Lnbits info is required to manage bounties and claims. Add new bounty to choose the default or your own.`
+              );
+              return;
+            }
+          }
+          await setIsDefaultLnbits((!userLnbitsConfig).toString());
+        }
       }
       // Scope the bounty to the workspace's git repo when possible so it
       // shows up in unauthenticated `GET /bounties?repo=...` / filter calls
@@ -128,7 +162,8 @@ export const addBountyCommand = (
         userLnbitsConfig?.apiKey,
         test,
         userNostrPubkey,
-        repoSlug
+        repoSlug,
+        fundingMode
       );
 
       // If the backend call failed, `createBounty` already surfaced a toast
@@ -159,12 +194,19 @@ export const addBountyCommand = (
 
       let userPubkey = await getNostrUserPubkey();
 
-      // Show success + QR/webview (your existing code)
-      await showBountyInvoicePlanel(test, fullBounty, bounties, context, onBountiesChangedEmitter);
-
-      vscode.window.showInformationMessage(
-        `✅ Bounty created: ${amountSats} sats for "${test.label}". QR panel opened. Fund it!`
-      );
+      if (fundingMode === 'nwc') {
+        // No invoice to fund — the creator's wallet pays directly on approval.
+        vscode.window.showInformationMessage(
+          `✅ Bounty created: ${amountSats} sats for "${test.label}". ` +
+            `Sats will move from your connected wallet when you approve a claim.`
+        );
+      } else {
+        // Custodial path: show QR + poll for payment as today.
+        await showBountyInvoicePlanel(test, fullBounty, bounties, context, onBountiesChangedEmitter);
+        vscode.window.showInformationMessage(
+          `✅ Bounty created: ${amountSats} sats for "${test.label}". QR panel opened. Fund it!`
+        );
+      }
 
       if (!userPubkey) {
         userPubkey = await getNostrUserPubkey();
@@ -221,12 +263,50 @@ export const removeBountyCommand = (
       return;
     }
 
-    try {
-      // Call the backend helper to set active = false
-      const success = await deactivateBounty(bounty.id); // assumes bounty has id (UUID)
+    // Determine refund eligibility. Funds are only recoverable if the
+    // invoice was actually paid and the claim hasn't already been approved
+    // (approved = sats already went to the claimant, nothing left to refund).
+    // NWC bounties are never refundable here — no sats were ever custodied;
+    // the creator's own wallet holds them and simply won't be drawn down.
+    const latestClaimStatus = bounty.claims?.[0]?.status;
+    const canRefund =
+      bounty.fundingMode !== 'nwc' &&
+      bounty.invoicePaid &&
+      latestClaimStatus !== claimStatusApproved;
+    const hasPendingClaim = latestClaimStatus === claimStatusPending;
 
-      if (!success) {
-        // Error already shown by the helper
+    let refundLnurl: string | undefined;
+
+    if (canRefund) {
+      // A pending claim means somebody is actively trying to collect. Warn
+      // the creator that refunding orphans that claim.
+      if (hasPendingClaim) {
+        const proceed = await vscode.window.showWarningMessage(
+          `A claim is pending on this bounty. Refunding will abandon the claimant. Continue?`,
+          { modal: true },
+          'Refund Anyway'
+        );
+        if (proceed !== 'Refund Anyway') {
+          return;
+        }
+      }
+
+      refundLnurl = await promptForLnurl(
+        `Refund ${bounty.amountSats} sats`,
+        'Paste the LNURL or LN address to receive the refund'
+      );
+      if (!refundLnurl) {
+        return; // user cancelled the LNURL prompt
+      }
+    }
+
+    try {
+      // Call the backend helper to set active = false (and optionally refund)
+      const result =  await deactivateBounty(bounty.id, refundLnurl);
+
+      if (!result.success) {
+        // Error already shown by the helper; leave local state untouched so
+        // the user can retry.
         return;
       }
 
@@ -238,18 +318,26 @@ export const removeBountyCommand = (
 
       // Optional: update context if needed
       vscode.commands.executeCommand('setContext', 'testItemHasBounty', bounties.size > 0);
+
+      if (result.refund && refundLnurl) {
+        const shortLnurl =
+          refundLnurl.length > 32
+            ? `${refundLnurl.slice(0, 16)}…${refundLnurl.slice(-10)}`
+            : refundLnurl;
+        vscode.window.showInformationMessage(
+          `Refunded ${result.refund.amountSats} sats to ${shortLnurl}.`
+        );
+      } else {
+        vscode.window.showInformationMessage(
+          `Bounty removed from "${test.label}" (${bounty.amountSats} sats)`
+        );
+      }
     } catch (error) {
       console.error('[removeBountyCommand] Error deactivating bounty:', error);
       vscode.window.showErrorMessage(
         `Failed to deactivate bounty: ${error instanceof Error ? error.message : 'Unknown error'}`
       );
     }
-
-    vscode.commands.executeCommand('setContext', 'testItemHasBounty', false);
-
-    vscode.window.showInformationMessage(
-      `Bounty removed from "${test.label}" (${bounty.amountSats} sats)`
-    );
   });
 
 export const checkPaidCommand = (
@@ -311,20 +399,10 @@ export const claimBountyCommand = (
       vscode.window.showErrorMessage('Bounty not funded yet or already claimed');
       return;
     }
-    // Disallows leading/trailing dots, consecutive dots, etc.
-    const lnurlRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
-    // Prompt for LNURL instead of bolt11 invoice
-    const lnurl = await vscode.window.showInputBox({
-      title: `Claim ${bounty.amountSats} sats bounty`,
-      prompt: 'Paste your LNURL or LN address',
-      validateInput: (v) => {
-        v = v.trim();
-        if (!v.startsWith('lnurl') && !lnurlRegex.test(v)) {
-          return 'LNURL is not a valid format. Must start with lnurl... or formatted like guppie@primal.net';
-        }
-        return null;
-      },
-    });
+    const lnurl = await promptForLnurl(
+      `Claim ${bounty.amountSats} sats bounty`,
+      'Paste your LNURL or LN address'
+    );
 
     if (!lnurl) {
       return;
@@ -429,6 +507,16 @@ async function showBountyInvoicePlanel(
   context: vscode.ExtensionContext,
   onBountiesChangedEmitter: vscode.EventEmitter<void>
 ): Promise<void> {
+  // NWC bounties have no invoice or payment hash — never open the QR panel
+  // for them. Callers are expected to short-circuit, but guard defensively.
+  if (!bounty.invoice || !bounty.paymentHash) {
+    console.warn(
+      '[showBountyInvoicePlanel] Skipping panel — bounty has no invoice/paymentHash',
+      bounty.id
+    );
+    return;
+  }
+  const invoice = bounty.invoice;
   const panel = vscode.window.createWebviewPanel(
     'bountyInvoice',
     `Bounty: ${test.label} (${bounty.amountSats} sats)`,
@@ -440,7 +528,7 @@ async function showBountyInvoicePlanel(
     // Generate QR code as SVG
     const invoiceQrSvg = await new Promise<string>((resolve, reject) => {
       toString(
-        bounty.invoice,
+        invoice,
         { type: 'svg', errorCorrectionLevel: 'M' },
         (err: Error | null | undefined, svg: string) => {
           if (err) {
@@ -482,7 +570,7 @@ async function showBountyInvoicePlanel(
 
     // Set Webview HTML
     const nonce = getNonce();
-    const escapedInvoice = escapeHtml(bounty.invoice);
+    const escapedInvoice = escapeHtml(invoice);
     panel.webview.html = `
   <!DOCTYPE html>
   <html lang="en">

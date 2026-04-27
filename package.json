@@ -66,6 +66,16 @@
         "category": "Nostr"
       },
       {
+        "command": "sattest.connectWallet",
+        "title": "Connect Lightning Wallet (NWC)",
+        "category": "Bounty"
+      },
+      {
+        "command": "sattest.disconnectWallet",
+        "title": "Disconnect Lightning Wallet (NWC)",
+        "category": "Bounty"
+      },
+      {
         "command": "sattest.approveClaim",
         "title": "Approve Claim",
         "category": "Claim"
@@ -89,7 +99,7 @@
         },
         "sattest.backendUrl": {
           "type": "string",
-          "default": "http://localhost:3000",
+          "default": "http://localhost:3001",
           "description": "URL of the Sattest backend server. Use https:// for production."
         },
         "sattest.nostrRelays": {
