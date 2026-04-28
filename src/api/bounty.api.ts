@@ -58,6 +58,12 @@ export async function fetchBounties(options: FetchBountiesOptions = {}): Promise
       } else {
         b.testId = rootPath + '/' + b.testId;
       }
+      // Normalize: backend may omit `claims` for bounties with none. Downstream
+      // code (claim/approve handlers, code-lens) treats it as an array, so
+      // guarantee that contract here rather than scattering `?? []` checks.
+      if (!Array.isArray(b.claims)) {
+        b.claims = [];
+      }
     });
     return backendBounties;
   } catch (error) {
@@ -123,6 +129,12 @@ export async function createBounty(
     }
 
     const newBounty = await response.json();
+    // Same normalization as fetchBounties — a fresh bounty has no claims and
+    // the backend omits the field. Guarantee an empty array so callers can
+    // safely index `.claims[0]`.
+    if (newBounty && !Array.isArray(newBounty.claims)) {
+      newBounty.claims = [];
+    }
     return newBounty;
   } catch (error) {
     console.error('[fetchBounties] Error creating bounty:', error);

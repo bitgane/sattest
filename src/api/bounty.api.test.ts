@@ -100,6 +100,21 @@ describe('fetchBounties', () => {
     // contract here, not the toast.
   });
 
+  it('normalizes a missing `claims` field to an empty array', async () => {
+    // Backend can return bounties without a `claims` field — the claim flow
+    // and code-lens both index into it, so we need an array here, not undefined.
+    jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        bounties: [{ testId: '/foo.test.ts#t', amountSats: 1000 /* no claims */ }],
+      }),
+    } as any);
+
+    const [bounty] = await fetchBounties();
+    expect(Array.isArray(bounty.claims)).toBe(true);
+    expect(bounty.claims).toEqual([]);
+  });
+
   it('returns empty array when response has no bounties field', async () => {
     jest.spyOn(global, 'fetch').mockResolvedValue({
       ok: true,
@@ -217,6 +232,16 @@ describe('createBounty', () => {
 
     const result = await createBounty(5000, undefined, undefined, mockTest, 'creator-pub');
     expect(result).toBeUndefined();
+  });
+
+  it('normalizes a missing `claims` field on the returned bounty', async () => {
+    jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({ id: 'bounty-uuid', testId: 'test-123' /* no claims */ }),
+    } as any);
+
+    const result = await createBounty(5000, undefined, undefined, mockTest, 'creator-pub');
+    expect(result?.claims).toEqual([]);
   });
 
   it('falls back to status when error body has no message', async () => {

@@ -395,7 +395,7 @@ export const claimBountyCommand = (
       return;
     }
     const bounty = bounties.get(test.id);
-    if (!bounty || !bounty.invoicePaid || !!bounty.claims[0]?.status) {
+    if (!bounty || !bounty.invoicePaid || !!bounty.claims?.[0]?.status) {
       vscode.window.showErrorMessage('Bounty not funded yet or already claimed');
       return;
     }
@@ -411,9 +411,10 @@ export const claimBountyCommand = (
     try {
       // Send claim to backend
       const newClaim = await claimBountyWithLnAddress(bounty.id, lnurl);
-      // Update local cache
+      // Update local cache. The bounty is fresh-from-backend so `claims` may
+      // be absent or empty — always replace with the claim we just got back.
       if (newClaim?.status === claimStatusPending) {
-        bounty.claims[0].status = newClaim?.status;
+        bounty.claims = [newClaim];
         bounties.set(test.id, bounty);
         onBountiesChangedEmitter.fire();
         // Notify claimant
@@ -467,8 +468,11 @@ export const approveClaimCommand = (
     try {
       const updatedBounty = await approveClaim(bounty.id, userNostrPubkey);
       if (updatedBounty) {
-        // Update local state
-        bounty.claims[0].status = claimStatusApproved;
+        // Update local state. Guard against an empty/missing claims array —
+        // shouldn't happen on the approve path but cheaper than a crash.
+        if (bounty.claims?.[0]) {
+          bounty.claims[0].status = claimStatusApproved;
+        }
         bounties.set(test.id, bounty);
         onBountiesChangedEmitter.fire();
       }
@@ -650,7 +654,6 @@ async function showBountyInvoicePlanel(
       Copy Invoice
     </button>
     <p id="status" class="status">Waiting for payment via Lightning wallet...</p>
-    <script nonce="${nonce}">
     <script nonce="${nonce}">
       const vscode = acquireVsCodeApi();
       document.getElementById('copyBtn').addEventListener('click', function() {
