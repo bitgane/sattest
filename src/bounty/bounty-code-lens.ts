@@ -26,6 +26,21 @@ export class BountyCodeLensProvider implements vscode.CodeLensProvider {
     });
   }
 
+  /**
+   * Update the Nostr pubkey used to decide whether to render the creator-only
+   * "Approve Claim" lens. Called when the user connects to Nostr after the
+   * extension has already activated — without this, the lens would forever
+   * see `undefined` and the creator could only approve via the right-click
+   * menu.
+   */
+  setUserNostrPubkey(pubkey: string | undefined) {
+    if (this.userNostrPubkey === pubkey) {
+      return;
+    }
+    this.userNostrPubkey = pubkey;
+    this._onDidChangeCodeLenses.fire();
+  }
+
   provideCodeLenses(
     document: vscode.TextDocument
   ): vscode.CodeLens[] | Thenable<vscode.CodeLens[]> {
@@ -59,8 +74,14 @@ export class BountyCodeLensProvider implements vscode.CodeLensProvider {
 
       if (claimStatus === claimStatusPending) {
         title = `💰 Claim Pending (${bounty.amountSats} sats)${badge}`;
-        command = ''; // add a "View Claim Status" command later
-        tooltip = 'Waiting for creator approval';
+        // No action wired up — the lens is purely informational here. The
+        // creator approves via the dedicated "✅ Approve Claim" lens that
+        // renders below this one for them.
+        command = '';
+        tooltip =
+          this.userNostrPubkey && bounty.creatorId === this.userNostrPubkey
+            ? 'Use the Approve Claim action below to release the payout'
+            : 'Waiting for the creator to approve your claim';
       } else if (claimStatus === claimStatusApproved) {
         title = `💰 Claim Approved – Payout Sent (${bounty.amountSats} sats)${badge}`;
       } else if (bounty.invoicePaid) {
@@ -99,7 +120,11 @@ export class BountyCodeLensProvider implements vscode.CodeLensProvider {
           new vscode.CodeLens(effectiveRange, {
             title: '✅ Approve Claim',
             command: 'sattest.approveClaim',
-            arguments: [testId, item],
+            // The command handler expects a TestItem (it reads `test.id` to
+            // look up the bounty). Passing `[testId, item]` here used to
+            // hand a string in as the first arg and the handler bailed with
+            // "No test selected". Match the shape the other lenses use.
+            arguments: [item],
             tooltip: `Approve claim of ${bounty.amountSats} sats`,
           })
         );

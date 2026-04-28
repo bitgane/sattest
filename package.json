@@ -69,6 +69,16 @@
         "command": "sattest.approveClaim",
         "title": "Approve Claim",
         "category": "Claim"
+      },
+      {
+        "command": "sattest.connectWallet",
+        "title": "Connect Lightning Wallet (NWC)",
+        "category": "Bounty"
+      },
+      {
+        "command": "sattest.disconnectWallet",
+        "title": "Disconnect Lightning Wallet (NWC)",
+        "category": "Bounty"
       }
     ],
     "keybindings": [
@@ -84,13 +94,11 @@
       "properties": {
         "sattest.apiKey": {
           "type": "string",
-          "default": "",
-          "description": "API key used to authenticate with the Sattest backend."
+          "default": ""
         },
         "sattest.backendUrl": {
           "type": "string",
-          "default": "http://localhost:3001",
-          "description": "URL of the Sattest backend server. Use https:// for production."
+          "default": "http://localhost:3000"
         },
         "sattest.nostrRelays": {
           "type": "array",

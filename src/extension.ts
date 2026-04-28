@@ -54,6 +54,12 @@ export async function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.commands.registerCommand('sattest.connectNostr', async () => {
       await connectNostr(context, onBountiesChangedEmitter);
+      // The code-lens provider was constructed during activation with whatever
+      // pubkey was cached at that moment (often `undefined`). Now that the
+      // user has connected, push the fresh pubkey in so the creator-only
+      // "Approve Claim" lens starts rendering on bounties they own.
+      const refreshedPubkey = await getNostrUserPubkey();
+      codeLensProvider.setUserNostrPubkey(refreshedPubkey);
     })
   );
 

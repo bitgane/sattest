@@ -19,9 +19,37 @@ export interface FetchBountiesOptions {
 let lastFetchErrorToastAt = 0;
 const FETCH_ERROR_TOAST_COOLDOWN_MS = 10_000;
 
+// Backend's `/bounties/filter` rejects requests with more than this many test
+// IDs as a DoS guard. We respect it by chunking large workspaces into
+// successive requests and merging the results client-side.
+const FILTER_CHUNK_SIZE = 500;
+
 export async function fetchBounties(options: FetchBountiesOptions = {}): Promise<BountyInfo[]> {
   const { testId, includeInactive = false, repo, testIds } = options;
   try {
+    // Large workspaces can blow past the per-request testIds cap. Split into
+    // chunks, fire them in parallel, and merge — de-duplicating by bounty id
+    // in case the backend ever returns the same bounty under multiple chunks
+    // (defense in depth; current schema makes that impossible).
+    if (testIds && testIds.length > FILTER_CHUNK_SIZE) {
+      const chunks: string[][] = [];
+      for (let i = 0; i < testIds.length; i += FILTER_CHUNK_SIZE) {
+        chunks.push(testIds.slice(i, i + FILTER_CHUNK_SIZE));
+      }
+      const results = await Promise.all(
+        chunks.map((chunk) =>
+          fetchBounties({ testId, includeInactive, repo, testIds: chunk })
+        )
+      );
+      const merged = new Map<string, BountyInfo>();
+      for (const list of results) {
+        for (const b of list) {
+          merged.set(b.id, b);
+        }
+      }
+      return Array.from(merged.values());
+    }
+
     const usePost = testIds && testIds.length > 0;
     const url = new URL(`${getBackendUrl()}/bounties${usePost ? '/filter' : ''}`);
     if (testId) {
@@ -45,7 +73,29 @@ export async function fetchBounties(options: FetchBountiesOptions = {}): Promise
     const response = await fetch(url, fetchOptions);
 
     if (!response.ok) {
-      throw new Error(`[fetchBounties] Failed to fetch bounties: ${response.status}`);
+      // Pull the backend's JSON error body so callers (and us, in the dev
+      // console) can see which validator rejected what — the bare status code
+      // is useless when /bounties/filter has multiple Zod rules.
+      let detail = '';
+      try {
+        const errBody = (await response.json()) as {
+          error?: string;
+          issues?: Array<{ field: string; message: string }>;
+        };
+        const issues = errBody.issues
+          ?.map((i) => `${i.field}: ${i.message}`)
+          .join('; ');
+        detail = issues
+          ? ` (${errBody.error ?? 'Validation failed'} — ${issues})`
+          : errBody.error
+            ? ` (${errBody.error})`
+            : '';
+      } catch {
+        /* body wasn't JSON */
+      }
+      throw new Error(
+        `[fetchBounties] Failed to fetch bounties: ${response.status}${detail} (url=${url.toString()}, method=${usePost ? 'POST' : 'GET'})`
+      );
     }
 
     const data = await response.json();
