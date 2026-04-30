@@ -68,6 +68,49 @@ describe('BountyCodeLensProvider', () => {
       expect(lenses).toEqual([]);
     });
 
+    it('setUserNostrPubkey: starts rendering Approve Claim after a late connect', () => {
+      const uri = vscode.Uri.file('/mock/workspace/foo.test.ts');
+      const mockItem = {
+        id: 'test-1',
+        label: 'my test',
+        uri,
+        range: new vscode.Range(5, 0, 5, 10),
+        children: [],
+      };
+      (findTestItemById as jest.Mock).mockReturnValue(mockItem);
+
+      bounties.set(
+        'test-1',
+        createBounty({
+          invoicePaid: true,
+          paymentHash: 'hash',
+          creatorId: 'late-pubkey',
+          claims: [{ status: claimStatusPending } as ClaimInfo],
+        })
+      );
+      // Provider built with no pubkey (simulating user hadn't connected at activation).
+      provider = new BountyCodeLensProvider(bounties, emitter, undefined);
+
+      let lenses = provider.provideCodeLenses(createMockDocument()) as vscode.CodeLens[];
+      expect(lenses.find((l) => l.command?.title.includes('Approve Claim'))).toBeUndefined();
+
+      // User connects → push the pubkey in.
+      const fireSpy = jest.spyOn(provider._onDidChangeCodeLenses, 'fire');
+      provider.setUserNostrPubkey('late-pubkey');
+      expect(fireSpy).toHaveBeenCalled();
+
+      lenses = provider.provideCodeLenses(createMockDocument()) as vscode.CodeLens[];
+      expect(lenses.find((l) => l.command?.title.includes('Approve Claim'))).toBeDefined();
+    });
+
+    it('setUserNostrPubkey: skips refresh when pubkey is unchanged', () => {
+      provider = new BountyCodeLensProvider(bounties, emitter, 'pub-1');
+      const fireSpy = jest.spyOn(provider._onDidChangeCodeLenses, 'fire');
+      provider.setUserNostrPubkey('pub-1');
+      // No-op when nothing changed — avoids an unnecessary lens redraw.
+      expect(fireSpy).not.toHaveBeenCalled();
+    });
+
     it('appends "Non-custodial" badge when fundingMode is nwc', () => {
       const uri = vscode.Uri.file('/mock/workspace/foo.test.ts');
       const mockItem = {
@@ -235,6 +278,36 @@ describe('BountyCodeLensProvider', () => {
 
       const pendingLens = lenses.find((l) => l.command?.title.includes('Claim Pending'));
       expect(pendingLens).toBeDefined();
+    });
+
+    it('Approve Claim lens passes the TestItem (not the testId string) as the first command arg', () => {
+      // Regression: passing `[testId, item]` here meant the click handler
+      // received a string, did `string.id` → undefined, and toasted
+      // "No test selected" instead of opening the approve confirmation.
+      const uri = vscode.Uri.file('/mock/workspace/foo.test.ts');
+      const mockItem = {
+        id: 'test-1',
+        label: 'my test',
+        uri,
+        range: new vscode.Range(5, 0, 5, 10),
+        children: [],
+      };
+      (findTestItemById as jest.Mock).mockReturnValue(mockItem);
+
+      bounties.set(
+        'test-1',
+        createBounty({
+          invoicePaid: true,
+          paymentHash: 'hash',
+          creatorId: 'my-pubkey',
+          claims: [{ status: claimStatusPending } as ClaimInfo],
+        })
+      );
+      provider = new BountyCodeLensProvider(bounties, emitter, 'my-pubkey');
+      const lenses = provider.provideCodeLenses(createMockDocument()) as vscode.CodeLens[];
+      const approveLens = lenses.find((l) => l.command?.title.includes('Approve Claim'));
+
+      expect(approveLens?.command?.arguments).toEqual([mockItem]);
     });
 
     it('shows "Approve Claim" lens when creator views pending claim', () => {

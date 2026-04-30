@@ -116,6 +116,46 @@ describe('extension', () => {
       expect(connectNostr).toHaveBeenCalledWith(context, expect.anything());
     });
 
+    it('refreshes the code-lens pubkey after a late Nostr connect', async () => {
+      // Simulate: user connects to Nostr after activation. The cached pubkey
+      // at activate() time was undefined; calling getNostrUserPubkey() again
+      // after connectNostr resolves returns the freshly-paired pubkey.
+      const { getNostrUserPubkey } = require('./state');
+      (getNostrUserPubkey as jest.Mock)
+        .mockResolvedValueOnce(undefined) // activation read
+        .mockResolvedValueOnce('newly-paired-npub'); // post-connect read
+
+      let connectHandler: Function | undefined;
+      (vscode.commands.registerCommand as jest.Mock).mockImplementation(
+        (id: string, handler: Function) => {
+          if (id === 'sattest.connectNostr') {
+            connectHandler = handler;
+          }
+          return { dispose: jest.fn() };
+        }
+      );
+
+      // Capture the BountyCodeLensProvider instance that activate() constructs.
+      const codeLensModule = require('./bounty/bounty-code-lens');
+      const setSpy = jest.fn();
+      const ctorSpy = jest
+        .spyOn(codeLensModule, 'BountyCodeLensProvider')
+        .mockImplementation(() => ({
+          _onDidChangeCodeLenses: { fire: jest.fn(), event: jest.fn() },
+          onDidChangeCodeLenses: jest.fn(),
+          setUserNostrPubkey: setSpy,
+          provideCodeLenses: jest.fn().mockReturnValue([]),
+        }));
+
+      try {
+        await activate(createMockContext());
+        await connectHandler!();
+        expect(setSpy).toHaveBeenCalledWith('newly-paired-npub');
+      } finally {
+        ctorSpy.mockRestore();
+      }
+    });
+
     it('registers CodeLens provider for TypeScript and JavaScript', async () => {
       const context = createMockContext();
       await activate(context);

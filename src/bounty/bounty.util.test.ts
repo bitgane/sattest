@@ -878,6 +878,39 @@ describe('claimBountyCommand', () => {
     );
   });
 
+  it('does not crash when bounty.claims is undefined (backend omitted it)', async () => {
+    // Regression: a fresh-from-POST bounty with no `claims` field used to
+    // throw "Cannot read properties of undefined (reading '0')" because the
+    // optional chain was on `[0]?` instead of on `claims`.
+    const bounties = new Map<string, BountyInfo>();
+    bounties.set('test-id', {
+      id: 'bounty-uuid',
+      amountSats: 10000,
+      invoicePaid: true,
+      testId: 'test-id',
+      // claims field intentionally absent
+    } as unknown as BountyInfo);
+
+    const mockEmitter = { fire: jest.fn() } as any;
+
+    (vscode.window.showInputBox as jest.Mock).mockResolvedValueOnce('alice@primal.net');
+    (claimBountyWithLnAddress as jest.Mock).mockResolvedValue({
+      id: 'claim-1',
+      status: 'pending',
+      claimantLnurl: 'alice@primal.net',
+    });
+
+    claimBountyCommand(bounties, mockEmitter);
+    await expect(
+      capturedHandler!(createMockTestItem({ id: 'test-id' }))
+    ).resolves.not.toThrow();
+
+    // Claim was inserted into the freshly-created array.
+    const updated = bounties.get('test-id')!;
+    expect(updated.claims).toHaveLength(1);
+    expect(updated.claims[0].status).toBe('pending');
+  });
+
   it('handles claim API error', async () => {
     const bounties = new Map<string, BountyInfo>();
     bounties.set('test-id', {

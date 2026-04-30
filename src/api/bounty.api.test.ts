@@ -100,6 +100,21 @@ describe('fetchBounties', () => {
     // contract here, not the toast.
   });
 
+  it('normalizes a missing `claims` field to an empty array', async () => {
+    // Backend can return bounties without a `claims` field — the claim flow
+    // and code-lens both index into it, so we need an array here, not undefined.
+    jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        bounties: [{ testId: '/foo.test.ts#t', amountSats: 1000 /* no claims */ }],
+      }),
+    } as any);
+
+    const [bounty] = await fetchBounties();
+    expect(Array.isArray(bounty.claims)).toBe(true);
+    expect(bounty.claims).toEqual([]);
+  });
+
   it('returns empty array when response has no bounties field', async () => {
     jest.spyOn(global, 'fetch').mockResolvedValue({
       ok: true,
@@ -133,6 +148,54 @@ describe('fetchBounties', () => {
     expect(callUrl.toString()).toContain('repo=owner%2Frepo');
     expect(callOpts.method).toBe('POST');
     expect(JSON.parse(callOpts.body)).toEqual({ testIds: ['/src/foo.test.ts#test1'] });
+  });
+
+  it('chunks testIds into 500-entry batches when over the cap', async () => {
+    // Backend's /bounties/filter rejects > 500 testIds per request. Verify
+    // we split into chunks, hit POST once per chunk, and de-duplicate the
+    // merged result by bounty id.
+    const fetchSpy = jest.spyOn(global, 'fetch').mockImplementation(async (_url, init: any) => {
+      const body = JSON.parse(init.body) as { testIds: string[] };
+      // Echo a single bounty per request so we can count chunks.
+      return {
+        ok: true,
+        json: async () => ({
+          bounties: [
+            {
+              id: `b-${body.testIds[0]}`,
+              testId: body.testIds[0],
+              amountSats: 1000,
+            },
+          ],
+        }),
+      } as any;
+    });
+
+    const ids = Array.from({ length: 1100 }, (_, i) => `/t${i}.test.ts#x`);
+    const result = await fetchBounties({ testIds: ids });
+
+    // 1100 / 500 = 3 chunks (500 + 500 + 100)
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+    expect(result).toHaveLength(3); // one bounty per chunk
+    // First chunk's first id is t0; second chunk's is t500; third is t1000.
+    const ids2 = result.map((b) => b.testId).sort();
+    expect(ids2).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining('/t0.test.ts'),
+        expect.stringContaining('/t500.test.ts'),
+        expect.stringContaining('/t1000.test.ts'),
+      ])
+    );
+  });
+
+  it('does not chunk when testIds fits under the cap', async () => {
+    const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({ bounties: [] }),
+    } as any);
+
+    await fetchBounties({ testIds: Array.from({ length: 500 }, (_, i) => `/t${i}#x`) });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 
   it('uses GET without testIds', async () => {
@@ -217,6 +280,16 @@ describe('createBounty', () => {
 
     const result = await createBounty(5000, undefined, undefined, mockTest, 'creator-pub');
     expect(result).toBeUndefined();
+  });
+
+  it('normalizes a missing `claims` field on the returned bounty', async () => {
+    jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({ id: 'bounty-uuid', testId: 'test-123' /* no claims */ }),
+    } as any);
+
+    const result = await createBounty(5000, undefined, undefined, mockTest, 'creator-pub');
+    expect(result?.claims).toEqual([]);
   });
 
   it('falls back to status when error body has no message', async () => {
