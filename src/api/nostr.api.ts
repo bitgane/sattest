@@ -139,7 +139,7 @@ export async function connectNostr(
             </style>
         </head>
         <body>
-            <h2>Connect Sattest to Nostr</h2>
+            <h2>Connect to Nostr</h2>
             <p style="text-align:center;">Scan this QR with Primal, Amber, Alby, Nostrum or any NIP-46 signer, or copy the URI:</p>
             <div class="qr-container">
             ${qrSvg}
@@ -154,7 +154,7 @@ export async function connectNostr(
             </script>
 
             <div class="notice">
-            This connects your Nostr identity to Sattest. Any claim on a bounty you create will need your approval to be paid.
+            This connects your Nostr identity to Sattest, which allows you to create, claim, and approve bounties. If the connection is not working, end the remote session and try again.
             </div>
 
             <p id="status" class="status">Waiting for approval in your signer app...</p>
