@@ -34,6 +34,10 @@ jest.mock('../state', () => ({
   setNostrAuthEvent: jest.fn().mockResolvedValue(undefined),
   setNostrUserPubkey: jest.fn().mockResolvedValue(undefined),
   setNostrUserHandle: jest.fn().mockResolvedValue(undefined),
+  // Default to "no identity" so the connected-banner branch in connectNostr
+  // stays out of the way for unrelated tests; individual tests can override.
+  getNostrUserPubkey: jest.fn().mockResolvedValue(undefined),
+  getNostrUserHandle: jest.fn().mockResolvedValue(undefined),
   initializeSecrets: jest.fn(),
 }));
 
@@ -92,6 +96,56 @@ describe('connectNostr', () => {
 
     const { setNostrClientSecret } = require('../state');
     expect(setNostrClientSecret).not.toHaveBeenCalled();
+  });
+
+  it('renders "Connected as @<handle>" banner when an identity is already active', async () => {
+    const state = require('../state');
+    (state.getNostrUserPubkey as jest.Mock).mockResolvedValue('a'.repeat(64));
+    (state.getNostrUserHandle as jest.Mock).mockResolvedValue('bitgane');
+    (BunkerSigner.fromURI as jest.Mock).mockImplementation(
+      () => new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 5))
+    );
+
+    const panel = (vscode.window.createWebviewPanel as jest.Mock).mock.results[0]?.value;
+    await connectNostr(mockContext, mockEmitter);
+
+    const html = (vscode.window.createWebviewPanel as jest.Mock).mock.results.at(-1)!.value
+      .webview.html as string;
+    expect(html).toContain('Connected as @bitgane');
+    expect(html).toContain('class="connected"');
+    void panel;
+  });
+
+  it('falls back to a shortened pubkey in the banner when no handle is set', async () => {
+    const state = require('../state');
+    const pk = 'b'.repeat(64);
+    (state.getNostrUserPubkey as jest.Mock).mockResolvedValue(pk);
+    (state.getNostrUserHandle as jest.Mock).mockResolvedValue(undefined);
+    (BunkerSigner.fromURI as jest.Mock).mockImplementation(
+      () => new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 5))
+    );
+
+    await connectNostr(mockContext, mockEmitter);
+
+    const html = (vscode.window.createWebviewPanel as jest.Mock).mock.results.at(-1)!.value
+      .webview.html as string;
+    expect(html).toContain(`${pk.slice(0, 8)}…${pk.slice(-4)}`);
+  });
+
+  it('omits the connected banner entirely when no identity is active', async () => {
+    const state = require('../state');
+    (state.getNostrUserPubkey as jest.Mock).mockResolvedValue(undefined);
+    (state.getNostrUserHandle as jest.Mock).mockResolvedValue(undefined);
+    (BunkerSigner.fromURI as jest.Mock).mockImplementation(
+      () => new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 5))
+    );
+
+    await connectNostr(mockContext, mockEmitter);
+
+    const html = (vscode.window.createWebviewPanel as jest.Mock).mock.results.at(-1)!.value
+      .webview.html as string;
+    expect(html).not.toContain('class="connected"');
+    expect(html).not.toContain('Connected as');
   });
 
   it('returns undefined when signer times out', async () => {
@@ -153,6 +207,73 @@ describe('resolveNostrInfoFromBunkerSigner', () => {
       userPubkey: 'user-pubkey-hex',
       userHandle: '@alice',
     });
+  });
+
+  it('rewrites the panel to a minimal "Connected as <handle>" success view on pairing', async () => {
+    // After a successful pair (especially when swapping identities) the panel
+    // should drop the QR / copy-URI / scan instructions so the user can't
+    // accidentally pair a third identity in the seconds before auto-close.
+    const mockBunker = {
+      getPublicKey: jest.fn().mockResolvedValue('new-pubkey-hex'),
+      signEvent: jest.fn().mockResolvedValue({ kind: 22242, sig: 'fake-sig' }),
+    };
+    (BunkerSigner.fromURI as jest.Mock).mockResolvedValue(mockBunker);
+    mockPool.get.mockResolvedValue({ content: JSON.stringify({ name: 'newuser' }) });
+    // Pre-populate the panel HTML with the things that should be stripped.
+    mockPanel.webview.html =
+      '<svg class="qr-container"></svg><button id="copyUriBtn">Copy URI</button>' +
+      '<div class="notice">Scan this QR with...</div>' +
+      '<p id="status" class="status">Waiting...</p>';
+
+    await resolveNostrInfoFromBunkerSigner(
+      new Uint8Array(32),
+      'nostr+connect://test',
+      ['wss://relay.test.com'],
+      mockPool,
+      mockContext,
+      mockPanel
+    );
+
+    const html = mockPanel.webview.html as string;
+    expect(html).toContain('Connected as @newuser');
+    expect(html).toContain('class="connected"');
+    expect(html).toContain('Closing in a few seconds');
+    // QR / copy-URI / scan instructions all gone.
+    expect(html).not.toContain('qr-container');
+    expect(html).not.toContain('copyUriBtn');
+    expect(html).not.toContain('Scan this QR');
+  });
+
+  it('keeps the panel visible briefly before disposing on success', async () => {
+    jest.useFakeTimers();
+    try {
+      const mockBunker = {
+        getPublicKey: jest.fn().mockResolvedValue('pk'),
+        signEvent: jest.fn().mockResolvedValue({ kind: 22242, sig: 'fake-sig' }),
+      };
+      (BunkerSigner.fromURI as jest.Mock).mockResolvedValue(mockBunker);
+      mockPool.get.mockResolvedValue({ content: JSON.stringify({ name: 'x' }) });
+
+      await resolveNostrInfoFromBunkerSigner(
+        new Uint8Array(32),
+        'nostr+connect://test',
+        ['wss://relay.test.com'],
+        mockPool,
+        mockContext,
+        mockPanel
+      );
+
+      expect(mockPanel.dispose).not.toHaveBeenCalled();
+      // 4-second hold so the user sees the swap. Exact value isn't part of
+      // the public contract — the assertion just guards against a regression
+      // back to "dispose immediately".
+      jest.advanceTimersByTime(3999);
+      expect(mockPanel.dispose).not.toHaveBeenCalled();
+      jest.advanceTimersByTime(1);
+      expect(mockPanel.dispose).toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   it('uses fallback handle when no profile found', async () => {
