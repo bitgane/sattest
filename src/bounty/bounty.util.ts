@@ -63,8 +63,8 @@ export const addBountyCommand = (
     // Prompt for amount (sats)
     const amountInput = await vscode.window.showInputBox({
       title: `Bounty for "${test.label}"`,
-      prompt: 'Enter bounty amount in satoshis (e.g., 10000 for 0.0001 BTC)',
-      value: '10000',
+      prompt: 'Enter bounty amount in satoshis (10000 for 0.0001 BTC)',
+      value: '2100',
       validateInput: (value) => {
         if (!/^\d+$/.test(value.trim())) {
           return 'Enter a whole number of satoshis';

@@ -22,9 +22,66 @@ function escapeHtml(s: string): string {
 function getNonce(): string {
   return crypto.randomBytes(16).toString('base64');
 }
+
+/**
+ * Replace the Connect to Nostr panel with a minimal "you're connected" view
+ * after a successful pairing. Strips the QR / copy-URI / scan instructions so
+ * the panel can't be re-used to pair a third identity in the seconds before
+ * it auto-closes.
+ *
+ * Self-contained HTML (no script, no external resources) so it works under
+ * the panel's existing CSP without further nonces.
+ */
+function renderConnectedSuccess(panel: vscode.WebviewPanel, userHandle: string): void {
+  const safeHandle = escapeHtml(userHandle);
+  panel.webview.html = `
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="UTF-8">
+      <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>Connected to Nostr</title>
+      <style>
+        body {
+          font-family: monospace;
+          padding: 20px;
+          background: #f5f5f5;
+          color: #333;
+          margin: 0;
+        }
+        h2 { text-align: center; color: #2c3e50; }
+        .connected {
+          background: #e8f5e9;
+          border: 1px solid #a5d6a7;
+          color: #1b5e20;
+          padding: 12px;
+          margin: 0 0 20px 0;
+          border-radius: 4px;
+          text-align: center;
+          font-weight: bold;
+          line-height: 1.5;
+        }
+        .closing {
+          text-align: center;
+          color: #555;
+          margin-top: 24px;
+        }
+      </style>
+    </head>
+    <body>
+      <h2>Connect to Nostr</h2>
+      <div class="connected">Connected as ${safeHandle}</div>
+      <p class="closing">Closing in a few seconds…</p>
+    </body>
+    </html>
+  `;
+}
 import {
   getNostrClientSecret,
   getNostrRelays,
+  getNostrUserHandle,
+  getNostrUserPubkey,
   setNostrAuthEvent,
   setNostrClientSecret,
   setNostrUserHandle,
@@ -75,6 +132,20 @@ export async function connectNostr(
     qrSvg = await QRCode.toString(connectionUri, { type: 'svg', errorCorrectionLevel: 'M' });
   } catch (err) {
     qrSvg = '<p>QR generation failed – copy URI below</p>';
+  }
+
+  // Render a banner at the top of the panel so the user knows which Nostr
+  // identity is currently active (handy when re-running this command to swap
+  // identities — the QR replaces the existing session). Hidden entirely when
+  // nothing is connected yet, since there's no truthful thing to say.
+  const currentHandle = await getNostrUserHandle();
+  const currentPubkey = await getNostrUserPubkey();
+  let connectedBannerHtml = '';
+  if (currentPubkey) {
+    const display = currentHandle
+      ? currentHandle.startsWith('@') ? currentHandle : `@${currentHandle}`
+      : `${currentPubkey.slice(0, 8)}…${currentPubkey.slice(-4)}`;
+    connectedBannerHtml = `<div class="connected">Connected as ${escapeHtml(display)}</div>`;
   }
 
   // Initial HTML
@@ -131,6 +202,17 @@ export async function connectNostr(
                 text-align: center;
                 line-height: 1.5;
             }
+            .connected {
+                background: #e8f5e9;
+                border: 1px solid #a5d6a7;
+                color: #1b5e20;
+                padding: 12px;
+                margin: 0 0 20px 0;
+                border-radius: 4px;
+                text-align: center;
+                font-weight: bold;
+                line-height: 1.5;
+            }
             .status {
                 text-align: center;
                 font-weight: bold;
@@ -140,6 +222,7 @@ export async function connectNostr(
         </head>
         <body>
             <h2>Connect to Nostr</h2>
+            ${connectedBannerHtml}
             <p style="text-align:center;">Scan this QR with Primal, Amber, Alby, Nostrum or any NIP-46 signer, or copy the URI:</p>
             <div class="qr-container">
             ${qrSvg}
@@ -260,10 +343,16 @@ export async function resolveNostrInfoFromBunkerSigner(
     await setNostrUserPubkey(userPubkey);
     await setNostrUserHandle(userHandle);
 
-    updateStatus(`Connected as ${userHandle}! Closing...`, 'green');
+    // Replace the entire panel body with a minimal success view: the green
+    // "Connected as @handle" banner updated to the *new* identity, and a
+    // "Closing in a few seconds…" status. The QR / copy-URI / scan
+    // instructions are gone — leaving them up while we tear down would invite
+    // the user to scan again with yet another identity. We deliberately keep
+    // the panel visible briefly so the swap is unambiguous.
+    renderConnectedSuccess(panel, userHandle);
     vscode.window.showInformationMessage(`Connected to Nostr: ${userHandle}`);
 
-    closePanel(2500);
+    closePanel(4000);
 
     return { userPubkey, userHandle };
   } catch (err) {
