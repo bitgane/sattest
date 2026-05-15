@@ -70,8 +70,8 @@ export const addBountyCommand = (
           return 'Enter a whole number of satoshis';
         }
         const sats = Number(value.trim());
-        if (sats < 1 || sats > 50000000) {
-          return 'Enter 1-50M satoshis';
+        if (sats < 1 || sats > 50000) {
+          return 'Enter 1-50K satoshis';
         }
         return null;
       },
