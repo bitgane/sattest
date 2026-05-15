@@ -50,7 +50,7 @@ Sattest discovers tests in all major languages and frameworks:
 
 1. Open Command Palette (`Ctrl+Shift+P`)
 2. Run **Bounty: Add Bounty** on a test (or right-click a test → Add Bounty)
-3. Enter amount in sats (1–50,000,000)
+3. Enter amount in sats (10–50,000)
 4. On first use, choose your LNbits setup:
    - **Use default** – uses the built-in LNbits node (easiest)
    - **Use my own LNbits** – provide your own LNbits URL and API key
