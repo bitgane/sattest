@@ -1,0 +1,209 @@
+{
+  "name": "sattest",
+  "publisher": "bitgane",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bitgane/sattest.git"
+  },
+  "license": "MIT",
+  "icon": "images/icon.png",
+  "type": "module",
+  "displayName": "Sattest — Lightning Test Bounties",
+  "description": "Attach non-custodial Bitcoin Lightning bounties to your tests — sats move wallet-to-wallet on approval over Nostr Wallet Connect (NWC).",
+  "version": "0.1.1",
+  "engines": {
+    "vscode": "^1.106.0"
+  },
+  "categories": [
+    "Testing",
+    "Other"
+  ],
+  "keywords": [
+    "bitcoin",
+    "lightning",
+    "nostr",
+    "nwc",
+    "bounty",
+    "testing",
+    "satoshis",
+    "lnurl",
+    "nip-47"
+  ],
+  "activationEvents": [
+    "onLanguage:typescript",
+    "onLanguage:javascript",
+    "onLanguage:typescriptreact",
+    "onLanguage:javascriptreact",
+    "onLanguage:java",
+    "onLanguage:python",
+    "onLanguage:go",
+    "onLanguage:rust",
+    "onLanguage:csharp",
+    "onLanguage:ruby",
+    "onLanguage:php",
+    "onLanguage:kotlin",
+    "onLanguage:swift",
+    "onLanguage:scala",
+    "onLanguage:cpp",
+    "onLanguage:c",
+    "onView:testing"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "sattest.addBounty",
+        "title": "Add Bounty",
+        "category": "Bounty"
+      },
+      {
+        "command": "sattest.checkPaid",
+        "title": "Check Bounty Paid",
+        "category": "Bounty"
+      },
+      {
+        "command": "sattest.claimBounty",
+        "title": "Claim Bounty",
+        "category": "Claim"
+      },
+      {
+        "command": "sattest.removeBounty",
+        "title": "Remove Bounty",
+        "category": "Bounty"
+      },
+      {
+        "command": "sattest.connectNostr",
+        "title": "Connect Nostr",
+        "category": "Nostr"
+      },
+      {
+        "command": "sattest.approveClaim",
+        "title": "Approve Claim",
+        "category": "Claim"
+      },
+      {
+        "command": "sattest.connectWallet",
+        "title": "Connect Lightning Wallet (NWC)",
+        "category": "Bounty"
+      },
+      {
+        "command": "sattest.disconnectWallet",
+        "title": "Disconnect Lightning Wallet (NWC)",
+        "category": "Bounty"
+      }
+    ],
+    "keybindings": [
+      {
+        "key": "ctrl+alt+n",
+        "mac": "cmd+alt+n",
+        "command": "sattest.connectNostr",
+        "when": "true"
+      }
+    ],
+    "configuration": {
+      "title": "Sattest",
+      "properties": {
+        "sattest.apiKey": {
+          "type": "string",
+          "default": ""
+        },
+        "sattest.backendUrl": {
+          "type": "string",
+          "default": "http://localhost:3000"
+        },
+        "sattest.nostrRelays": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "wss://relay.damus.io",
+            "wss://relay.primal.net",
+            "wss://nos.lol",
+            "wss://relay.nsec.app"
+          ],
+          "description": "List of Nostr relay WebSocket URLs to connect to."
+        }
+      }
+    },
+    "menus": {
+      "testing/item/gutter": [
+        {
+          "command": "sattest.addBounty",
+          "group": "navigation"
+        },
+        {
+          "command": "sattest.checkPaid",
+          "group": "navigation"
+        },
+        {
+          "command": "sattest.claimBounty",
+          "group": "navigation"
+        },
+        {
+          "command": "sattest.removeBounty",
+          "group": "navigation"
+        },
+        {
+          "command": "sattest.approveClaim",
+          "group": "navigation"
+        }
+      ],
+      "testing/item/context": [
+        {
+          "command": "sattest.addBounty",
+          "group": "inline"
+        },
+        {
+          "command": "sattest.checkPaid",
+          "group": "inline"
+        },
+        {
+          "command": "sattest.claimBounty",
+          "group": "inline"
+        },
+        {
+          "command": "sattest.removeBounty",
+          "group": "inline"
+        },
+        {
+          "command": "sattest.approveClaim",
+          "group": "inline"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src",
+    "test": "jest",
+    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md}\"",
+    "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,md}\""
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.14",
+    "@types/node": "22.x",
+    "@types/node-fetch": "^2.6.13",
+    "@types/qrcode": "^1.5.6",
+    "@types/qrcode-svg": "^1.1.5",
+    "@types/vscode": "^1.106.0",
+    "@vscode/test-cli": "^0.0.12",
+    "@vscode/test-electron": "^2.5.2",
+    "eslint": "^9.39.1",
+    "jest": "^29.7.0",
+    "prettier": "^3.8.1",
+    "ts-jest": "^29.4.6",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.48.1"
+  },
+  "dependencies": {
+    "bolt11": "^1.4.1",
+    "node-fetch": "^3.3.2",
+    "nostr-tools": "^2.23.1",
+    "qrcode": "^1.5.4",
+    "qrcodejs": "^1.0.0"
+  }
+}
