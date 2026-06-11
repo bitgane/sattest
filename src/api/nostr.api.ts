@@ -2,6 +2,8 @@ import * as crypto from 'crypto';
 import {
   generateSecretKey, // Uint8Array
   getPublicKey,
+  nip04,
+  nip44,
   SimplePool,
 } from 'nostr-tools';
 import * as vscode from 'vscode';
@@ -9,6 +11,101 @@ import { BunkerSigner, createNostrConnectURI } from 'nostr-tools/nip46';
 
 import { bytesToHex } from 'nostr-tools/utils';
 import * as QRCode from 'qrcode';
+
+/** NIP-46 messages travel as kind 24133 (ephemeral — relays don't store them). */
+const NOSTR_CONNECT_KIND = 24133;
+
+/**
+ * Waits for the remote signer's "connect" response after the user scans our
+ * nostrconnect:// QR. Resolves with the signer's pubkey.
+ *
+ * This replaces nostr-tools' `BunkerSigner.fromURI` handshake, whose matcher is
+ * too strict for real-world signers and silently drops their responses — the
+ * root cause of the "have to connect twice" bug:
+ *   • it only decrypts NIP-44, but several signers (Primal among them) encrypt
+ *     the connect response with NIP-04 → decrypt throws → event dropped;
+ *   • it only accepts `result === <secret>`, but many signers reply with the
+ *     legacy `result: "ack"` → event dropped.
+ * We accept both encodings and both reply shapes, and log anything we drop so
+ * the next interop quirk is diagnosable instead of silent.
+ */
+function waitForSignerHandshake(
+  pool: SimplePool,
+  relays: string[],
+  clientSecretBytes: Uint8Array,
+  clientPubkey: string,
+  secret: string,
+  timeoutMs = 90000
+): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    let done = false;
+    const finish = (fn: () => void) => {
+      if (done) {
+        return;
+      }
+      done = true;
+      clearTimeout(timer);
+      try {
+        sub.close();
+      } catch {
+        /* already closed */
+      }
+      fn();
+    };
+    const timer = setTimeout(() => finish(() => reject(new Error('Timeout'))), timeoutMs);
+
+    const sub = pool.subscribe(
+      relays,
+      { kinds: [NOSTR_CONNECT_KIND], '#p': [clientPubkey] },
+      {
+        onevent: (event) => {
+          if (done) {
+            return;
+          }
+          // Decrypt NIP-44 first (current spec), fall back to NIP-04 (what a
+          // number of signers still send for the connect response).
+          let payload: string;
+          try {
+            payload = nip44.decrypt(
+              event.content,
+              nip44.getConversationKey(clientSecretBytes, event.pubkey)
+            );
+          } catch {
+            try {
+              payload = nip04.decrypt(clientSecretBytes, event.pubkey, event.content);
+            } catch {
+              console.warn(
+                '[Nostr Connect] Dropping undecryptable kind-24133 event from',
+                event.pubkey
+              );
+              return;
+            }
+          }
+          try {
+            const response = JSON.parse(payload);
+            // Spec says echo the secret; many signers send the legacy "ack".
+            // Accept both — the success view shows the connected identity, so
+            // the user can see exactly who paired.
+            if (response.result === secret || response.result === 'ack') {
+              finish(() => resolve(event.pubkey));
+            } else if (response.error) {
+              console.warn('[Nostr Connect] Signer reported error during connect:', response.error);
+            } else {
+              console.warn(
+                '[Nostr Connect] Ignoring connect response with unexpected result:',
+                response.result
+              );
+            }
+          } catch (e) {
+            console.warn('[Nostr Connect] Malformed connect payload:', e);
+          }
+        },
+        onclose: () =>
+          finish(() => reject(new Error('Relay subscription closed before the signer responded'))),
+      }
+    );
+  });
+}
 
 function escapeHtml(s: string): string {
   return s
@@ -385,27 +482,42 @@ export async function resolveNostrInfoFromBunkerSigner(
   });
 
   try {
-    // Start the signer-response subscription FIRST. `fromURI` dispatches the
-    // relay REQ synchronously (before its promise settles), so the listener is
-    // live from this point. Attach a noop catch so a rejection during the
-    // settle window isn't flagged as unhandled — we re-await it below.
-    const bunkerPromise = BunkerSigner.fromURI(clientSecretBytes, connectionUri, { pool });
-    bunkerPromise.catch(() => {
-      /* re-awaited via the race below */
+    // Start the signer-response subscription FIRST (the relay REQ is
+    // dispatched synchronously inside waitForSignerHandshake), so the listener
+    // is live before the QR is scannable. Attach a noop catch so a rejection
+    // during the settle window isn't flagged as unhandled — re-awaited below.
+    const clientPubkey = getPublicKey(clientSecretBytes);
+    const secret = new URL(connectionUri).searchParams.get('secret') ?? '';
+    const handshakePromise = waitForSignerHandshake(
+      pool,
+      relays,
+      clientSecretBytes,
+      clientPubkey,
+      secret
+    );
+    handshakePromise.catch(() => {
+      /* re-awaited below */
     });
 
     // Give the subscription a moment to go live, THEN reveal the QR — so the
-    // first scan can't beat the (limit:0) listener and get dropped.
+    // first scan can't beat the listener and get dropped (NIP-46 events are
+    // ephemeral: relays only deliver them to already-live subscriptions).
     if (settleMs > 0) {
       await new Promise((resolve) => setTimeout(resolve, settleMs));
     }
     revealQr?.();
     updateStatus('Waiting for signer approval...', '#007acc');
 
-    const bunker = await Promise.race([
-      bunkerPromise,
-      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Timeout')), 90000)),
-    ]);
+    const remoteSignerPubkey = await handshakePromise;
+
+    // Handshake accepted — build the signer session directly from the bunker
+    // pointer. Unlike fromURI this doesn't re-wait for anything; it just wires
+    // up the conversation with the pubkey that answered our QR.
+    const bunker = BunkerSigner.fromBunker(
+      clientSecretBytes,
+      { pubkey: remoteSignerPubkey, relays, secret },
+      { pool }
+    );
 
     const userPubkey = await bunker.getPublicKey();
 

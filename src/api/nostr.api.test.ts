@@ -1,18 +1,27 @@
 import * as vscode from 'vscode';
 
-// Mock heavy nostr-tools dependencies
-jest.mock('nostr-tools', () => ({
-  generateSecretKey: jest.fn().mockReturnValue(new Uint8Array(32).fill(1)),
-  getPublicKey: jest.fn().mockReturnValue('mock-client-pubkey'),
-  SimplePool: jest.fn().mockImplementation(() => ({
+// Mock heavy nostr-tools dependencies. SimplePool returns a SHARED singleton so
+// tests can drive the handshake subscription that connectNostr's internal pool
+// opens (`new SimplePool()` inside connectNostr === the same object tests get).
+jest.mock('nostr-tools', () => {
+  const sharedPool = {
     ensureRelay: jest.fn().mockResolvedValue(undefined),
     get: jest.fn().mockResolvedValue(null),
-  })),
-}));
+    subscribe: jest.fn().mockReturnValue({ close: jest.fn() }),
+  };
+  return {
+    generateSecretKey: jest.fn().mockReturnValue(new Uint8Array(32).fill(1)),
+    getPublicKey: jest.fn().mockReturnValue('mock-client-pubkey'),
+    SimplePool: jest.fn().mockImplementation(() => sharedPool),
+    nip04: { decrypt: jest.fn() },
+    nip44: { decrypt: jest.fn(), getConversationKey: jest.fn() },
+  };
+});
 
 jest.mock('nostr-tools/nip46', () => ({
   BunkerSigner: {
     fromURI: jest.fn(),
+    fromBunker: jest.fn(),
   },
   createNostrConnectURI: jest.fn().mockReturnValue('nostr+connect://mock-uri'),
 }));
@@ -43,8 +52,37 @@ jest.mock('../state', () => ({
 
 import { connectNostr, resolveNostrInfoFromBunkerSigner } from './nostr.api.js';
 import { BunkerSigner } from 'nostr-tools/nip46';
-import { SimplePool } from 'nostr-tools';
+import { SimplePool, nip44 } from 'nostr-tools';
 import { getNostrClientSecret } from '../state.js';
+
+// The SimplePool mock returns a shared singleton — grab it for driving the
+// handshake subscription from tests.
+const sharedPool = new SimplePool() as unknown as {
+  ensureRelay: jest.Mock;
+  get: jest.Mock;
+  subscribe: jest.Mock;
+};
+
+/** Make the signer handshake fail immediately (subscribe throws). */
+function handshakeFails(error: Error = new Error('Timeout')) {
+  sharedPool.subscribe.mockImplementation(() => {
+    throw error;
+  });
+}
+
+/**
+ * Make the signer handshake succeed: the subscription delivers one encrypted
+ * connect event (via microtask, so it works under fake timers too) and nip44
+ * decrypts it to `{ result }`.
+ */
+function handshakeSucceeds(result: string = 'ack', remotePubkey = 'remote-signer-pubkey') {
+  (nip44.getConversationKey as jest.Mock).mockReturnValue(new Uint8Array(32));
+  (nip44.decrypt as jest.Mock).mockReturnValue(JSON.stringify({ result }));
+  sharedPool.subscribe.mockImplementation((_relays: unknown, _filter: unknown, opts: any) => {
+    Promise.resolve().then(() => opts.onevent({ pubkey: remotePubkey, content: 'enc' }));
+    return { close: jest.fn() };
+  });
+}
 
 describe('connectNostr', () => {
   let mockContext: vscode.ExtensionContext;
@@ -59,11 +97,15 @@ describe('connectNostr', () => {
       subscriptions: [],
     } as unknown as vscode.ExtensionContext;
     mockEmitter = new vscode.EventEmitter<void>();
+    // Implementations persist across tests (global setup only clears calls) —
+    // reset the shared pool's subscription to a benign default.
+    sharedPool.subscribe.mockReset().mockReturnValue({ close: jest.fn() });
+    sharedPool.ensureRelay.mockResolvedValue(undefined);
   });
 
   it('creates webview panel with QR code', async () => {
     // Make BunkerSigner timeout immediately
-    (BunkerSigner.fromURI as jest.Mock).mockRejectedValue(new Error('Timeout'));
+    handshakeFails();
 
     await connectNostr(mockContext, mockEmitter);
 
@@ -76,22 +118,22 @@ describe('connectNostr', () => {
   });
 
   it('starts the signer subscription before revealing the QR (anti "connect twice")', async () => {
-    // fromURI rejects (so connectNostr eventually finishes), but the rejection
-    // only surfaces after the settle — giving us a window to observe ordering.
-    (BunkerSigner.fromURI as jest.Mock).mockRejectedValue(new Error('Timeout'));
+    // The handshake rejects (so connectNostr eventually finishes), but the
+    // rejection only surfaces after the settle — a window to observe ordering.
+    handshakeFails();
     const panelResults = (vscode.window.createWebviewPanel as jest.Mock).mock.results;
 
     const connectPromise = connectNostr(mockContext, mockEmitter);
 
     // Flush connectNostr's setup microtasks (relay/secret/handle lookups + QR
-    // render) so the placeholder is painted and fromURI has started — but the
-    // 750ms macrotask settle that gates the QR reveal has NOT elapsed.
+    // render) so the placeholder is painted and the handshake subscription has
+    // started — but the 750ms macrotask settle gating the QR has NOT elapsed.
     for (let i = 0; i < 30; i++) {
       await Promise.resolve();
     }
 
     const html = panelResults.at(-1)!.value.webview.html as string;
-    expect(BunkerSigner.fromURI).toHaveBeenCalled(); // subscription dispatched
+    expect(sharedPool.subscribe).toHaveBeenCalled(); // subscription dispatched
     expect(html).toContain('Establishing secure connection'); // placeholder shown
     expect(html).not.toContain('qr-container'); // QR deferred until after settle
 
@@ -100,7 +142,7 @@ describe('connectNostr', () => {
 
   it('generates new client secret when none stored', async () => {
     (getNostrClientSecret as jest.Mock).mockResolvedValue(undefined);
-    (BunkerSigner.fromURI as jest.Mock).mockRejectedValue(new Error('Timeout'));
+    handshakeFails();
 
     await connectNostr(mockContext, mockEmitter);
 
@@ -113,7 +155,7 @@ describe('connectNostr', () => {
     (getNostrClientSecret as jest.Mock).mockResolvedValue(
       'abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890'
     );
-    (BunkerSigner.fromURI as jest.Mock).mockRejectedValue(new Error('Timeout'));
+    handshakeFails();
 
     await connectNostr(mockContext, mockEmitter);
 
@@ -125,9 +167,7 @@ describe('connectNostr', () => {
     const state = require('../state');
     (state.getNostrUserPubkey as jest.Mock).mockResolvedValue('a'.repeat(64));
     (state.getNostrUserHandle as jest.Mock).mockResolvedValue('bitgane');
-    (BunkerSigner.fromURI as jest.Mock).mockImplementation(
-      () => new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 5))
-    );
+    handshakeFails();
 
     const panel = (vscode.window.createWebviewPanel as jest.Mock).mock.results[0]?.value;
     await connectNostr(mockContext, mockEmitter);
@@ -144,9 +184,7 @@ describe('connectNostr', () => {
     const pk = 'b'.repeat(64);
     (state.getNostrUserPubkey as jest.Mock).mockResolvedValue(pk);
     (state.getNostrUserHandle as jest.Mock).mockResolvedValue(undefined);
-    (BunkerSigner.fromURI as jest.Mock).mockImplementation(
-      () => new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 5))
-    );
+    handshakeFails();
 
     await connectNostr(mockContext, mockEmitter);
 
@@ -159,9 +197,7 @@ describe('connectNostr', () => {
     const state = require('../state');
     (state.getNostrUserPubkey as jest.Mock).mockResolvedValue(undefined);
     (state.getNostrUserHandle as jest.Mock).mockResolvedValue(undefined);
-    (BunkerSigner.fromURI as jest.Mock).mockImplementation(
-      () => new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 5))
-    );
+    handshakeFails();
 
     await connectNostr(mockContext, mockEmitter);
 
@@ -175,9 +211,7 @@ describe('connectNostr', () => {
     const state = require('../state');
     (state.getNostrUserPubkey as jest.Mock).mockResolvedValue(undefined);
     (state.getNostrUserHandle as jest.Mock).mockResolvedValue(undefined);
-    (BunkerSigner.fromURI as jest.Mock).mockImplementation(
-      () => new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 5))
-    );
+    handshakeFails();
 
     await connectNostr(mockContext, mockEmitter, {
       noticeMessage: 'Refresh your Nostr login to complete your wallet connection.',
@@ -196,9 +230,7 @@ describe('connectNostr', () => {
     const state = require('../state');
     (state.getNostrUserPubkey as jest.Mock).mockResolvedValue('a'.repeat(64));
     (state.getNostrUserHandle as jest.Mock).mockResolvedValue('bitgane');
-    (BunkerSigner.fromURI as jest.Mock).mockImplementation(
-      () => new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 5))
-    );
+    handshakeFails();
 
     await connectNostr(mockContext, mockEmitter, {
       noticeMessage: 'Refresh your Nostr login to complete your wallet connection.',
@@ -220,9 +252,7 @@ describe('connectNostr', () => {
     const pk = 'b'.repeat(64);
     (state.getNostrUserPubkey as jest.Mock).mockResolvedValue(pk);
     (state.getNostrUserHandle as jest.Mock).mockResolvedValue(undefined);
-    (BunkerSigner.fromURI as jest.Mock).mockImplementation(
-      () => new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 5))
-    );
+    handshakeFails();
 
     await connectNostr(mockContext, mockEmitter, {
       noticeMessage: 'Refresh your Nostr login to complete your wallet connection.',
@@ -236,9 +266,7 @@ describe('connectNostr', () => {
   });
 
   it('omits the notice-action banner when no noticeMessage is provided', async () => {
-    (BunkerSigner.fromURI as jest.Mock).mockImplementation(
-      () => new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 5))
-    );
+    handshakeFails();
 
     await connectNostr(mockContext, mockEmitter);
 
@@ -248,9 +276,7 @@ describe('connectNostr', () => {
   });
 
   it('returns undefined when signer times out', async () => {
-    (BunkerSigner.fromURI as jest.Mock).mockImplementation(
-      () => new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 10))
-    );
+    handshakeFails(new Error('Timeout'));
 
     const result = await connectNostr(mockContext, mockEmitter);
     expect(result).toBeUndefined();
@@ -273,7 +299,7 @@ describe('resolveNostrInfoFromBunkerSigner', () => {
       },
       dispose: jest.fn(),
     };
-    mockPool = new SimplePool();
+    mockPool = new SimplePool(); // the shared singleton
     mockContext = {
       secrets: {
         get: jest.fn().mockResolvedValue(undefined),
@@ -281,6 +307,74 @@ describe('resolveNostrInfoFromBunkerSigner', () => {
       },
       subscriptions: [],
     } as unknown as vscode.ExtensionContext;
+    // Reset handshake plumbing between tests (implementations persist).
+    sharedPool.subscribe.mockReset().mockReturnValue({ close: jest.fn() });
+    mockPool.get = jest.fn().mockResolvedValue(null);
+  });
+
+  it('accepts a signer that echoes the secret (spec behavior)', async () => {
+    const mockBunker = {
+      getPublicKey: jest.fn().mockResolvedValue('pk'),
+      signEvent: jest.fn().mockResolvedValue({ kind: 22242, sig: 'fake-sig' }),
+    };
+    (BunkerSigner.fromBunker as jest.Mock).mockReturnValue(mockBunker);
+    handshakeSucceeds('s3cr3t'); // echoes the secret, not "ack"
+    mockPool.get.mockResolvedValue(null);
+
+    const result = await resolveNostrInfoFromBunkerSigner(
+      new Uint8Array(32),
+      'nostr+connect://test?secret=s3cr3t',
+      ['wss://relay.test.com'],
+      mockPool,
+      mockContext,
+      mockPanel,
+      undefined,
+      0
+    );
+
+    expect(result?.userPubkey).toBe('pk');
+    // The signer session is built from the pubkey that answered the handshake.
+    expect(BunkerSigner.fromBunker).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ pubkey: 'remote-signer-pubkey', secret: 's3cr3t' }),
+      expect.objectContaining({ pool: mockPool })
+    );
+  });
+
+  it('falls back to NIP-04 when NIP-44 decryption fails (signer interop)', async () => {
+    const { nip04 } = require('nostr-tools');
+    const mockBunker = {
+      getPublicKey: jest.fn().mockResolvedValue('pk'),
+      signEvent: jest.fn().mockResolvedValue({ kind: 22242, sig: 'fake-sig' }),
+    };
+    (BunkerSigner.fromBunker as jest.Mock).mockReturnValue(mockBunker);
+    mockPool.get.mockResolvedValue(null);
+
+    // NIP-44 decrypt throws (signer encrypted the response with NIP-04)…
+    (nip44.getConversationKey as jest.Mock).mockReturnValue(new Uint8Array(32));
+    (nip44.decrypt as jest.Mock).mockImplementation(() => {
+      throw new Error('invalid payload');
+    });
+    // …NIP-04 succeeds with the legacy ack reply.
+    (nip04.decrypt as jest.Mock).mockReturnValue(JSON.stringify({ result: 'ack' }));
+    sharedPool.subscribe.mockImplementation((_r: unknown, _f: unknown, opts: any) => {
+      Promise.resolve().then(() => opts.onevent({ pubkey: 'remote-signer-pubkey', content: 'enc' }));
+      return { close: jest.fn() };
+    });
+
+    const result = await resolveNostrInfoFromBunkerSigner(
+      new Uint8Array(32),
+      'nostr+connect://test',
+      ['wss://relay.test.com'],
+      mockPool,
+      mockContext,
+      mockPanel,
+      undefined,
+      0
+    );
+
+    expect(result?.userPubkey).toBe('pk');
+    expect(nip04.decrypt).toHaveBeenCalled();
   });
 
   it('resolves user info on successful signer connection', async () => {
@@ -288,7 +382,8 @@ describe('resolveNostrInfoFromBunkerSigner', () => {
       getPublicKey: jest.fn().mockResolvedValue('user-pubkey-hex'),
       signEvent: jest.fn().mockResolvedValue({ kind: 22242, sig: 'fake-sig' }),
     };
-    (BunkerSigner.fromURI as jest.Mock).mockResolvedValue(mockBunker);
+    (BunkerSigner.fromBunker as jest.Mock).mockReturnValue(mockBunker);
+    handshakeSucceeds();
     mockPool.get.mockResolvedValue({
       content: JSON.stringify({ name: 'alice' }),
     });
@@ -318,7 +413,8 @@ describe('resolveNostrInfoFromBunkerSigner', () => {
       getPublicKey: jest.fn().mockResolvedValue('new-pubkey-hex'),
       signEvent: jest.fn().mockResolvedValue({ kind: 22242, sig: 'fake-sig' }),
     };
-    (BunkerSigner.fromURI as jest.Mock).mockResolvedValue(mockBunker);
+    (BunkerSigner.fromBunker as jest.Mock).mockReturnValue(mockBunker);
+    handshakeSucceeds();
     mockPool.get.mockResolvedValue({ content: JSON.stringify({ name: 'newuser' }) });
     // Pre-populate the panel HTML with the things that should be stripped.
     mockPanel.webview.html =
@@ -354,7 +450,8 @@ describe('resolveNostrInfoFromBunkerSigner', () => {
         getPublicKey: jest.fn().mockResolvedValue('pk'),
         signEvent: jest.fn().mockResolvedValue({ kind: 22242, sig: 'fake-sig' }),
       };
-      (BunkerSigner.fromURI as jest.Mock).mockResolvedValue(mockBunker);
+      (BunkerSigner.fromBunker as jest.Mock).mockReturnValue(mockBunker);
+    handshakeSucceeds();
       mockPool.get.mockResolvedValue({ content: JSON.stringify({ name: 'x' }) });
 
       await resolveNostrInfoFromBunkerSigner(
@@ -386,7 +483,8 @@ describe('resolveNostrInfoFromBunkerSigner', () => {
       getPublicKey: jest.fn().mockResolvedValue('abcdef1234567890abcdef'),
       signEvent: jest.fn().mockResolvedValue({ kind: 22242, sig: 'fake-sig' }),
     };
-    (BunkerSigner.fromURI as jest.Mock).mockResolvedValue(mockBunker);
+    (BunkerSigner.fromBunker as jest.Mock).mockReturnValue(mockBunker);
+    handshakeSucceeds();
     mockPool.get.mockResolvedValue(null);
 
     const result = await resolveNostrInfoFromBunkerSigner(
@@ -409,7 +507,8 @@ describe('resolveNostrInfoFromBunkerSigner', () => {
       getPublicKey: jest.fn().mockResolvedValue('pubkey123456789012345'),
       signEvent: jest.fn().mockResolvedValue({ kind: 22242, sig: 'fake' }),
     };
-    (BunkerSigner.fromURI as jest.Mock).mockResolvedValue(mockBunker);
+    (BunkerSigner.fromBunker as jest.Mock).mockReturnValue(mockBunker);
+    handshakeSucceeds();
     mockPool.get.mockResolvedValue({ content: 'invalid json{{{' });
 
     const result = await resolveNostrInfoFromBunkerSigner(
@@ -429,7 +528,7 @@ describe('resolveNostrInfoFromBunkerSigner', () => {
   });
 
   it('returns undefined on error', async () => {
-    (BunkerSigner.fromURI as jest.Mock).mockRejectedValue(new Error('Connection refused'));
+    handshakeFails(new Error('Connection refused'));
 
     const result = await resolveNostrInfoFromBunkerSigner(
       new Uint8Array(32),
@@ -453,7 +552,8 @@ describe('resolveNostrInfoFromBunkerSigner', () => {
       getPublicKey: jest.fn().mockResolvedValue('user-pubkey'),
       signEvent: jest.fn().mockResolvedValue({ kind: 22242, sig: 'fake' }),
     };
-    (BunkerSigner.fromURI as jest.Mock).mockResolvedValue(mockBunker);
+    (BunkerSigner.fromBunker as jest.Mock).mockReturnValue(mockBunker);
+    handshakeSucceeds();
     mockPool.get.mockResolvedValue({
       content: JSON.stringify({ name: 'bob' }),
     });
@@ -477,7 +577,8 @@ describe('resolveNostrInfoFromBunkerSigner', () => {
       getPublicKey: jest.fn().mockResolvedValue('user-pubkey'),
       signEvent: jest.fn().mockResolvedValue({ kind: 22242, sig: 'fake' }),
     };
-    (BunkerSigner.fromURI as jest.Mock).mockResolvedValue(mockBunker);
+    (BunkerSigner.fromBunker as jest.Mock).mockReturnValue(mockBunker);
+    handshakeSucceeds();
     mockPool.get.mockResolvedValue({
       content: JSON.stringify({ name: '@alice' }),
     });
