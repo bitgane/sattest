@@ -49,6 +49,12 @@
     "onView:testing"
   ],
   "main": "./out/extension.js",
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "Sattest sends a Nostr-signed auth credential and your Lightning wallet (NWC) spending grant to its backend. A workspace must be trusted before the extension activates so a malicious repo cannot redirect those secrets via .vscode/settings.json."
+    }
+  },
   "contributes": {
     "commands": [
       {
@@ -105,11 +111,14 @@
       "properties": {
         "sattest.apiKey": {
           "type": "string",
-          "default": ""
+          "default": "",
+          "scope": "machine",
+          "description": "Reserved API key. Machine-scoped so a workspace cannot override it."
         },
         "sattest.backendUrl": {
           "type": "string",
-          "default": "http://localhost:3000"
+          "scope": "machine",
+          "markdownDescription": "Sattest backend base URL. **Machine-scoped**: it can only be set in your user settings, never by a workspace's `.vscode/settings.json` — this endpoint receives your Nostr auth credential and Lightning wallet (NWC) spending grant, so a repo must not be able to redirect it. Must be `https://` (or `http://localhost` for local development)."
         },
         "sattest.nostrRelays": {
           "type": "array",
@@ -122,7 +131,8 @@
             "wss://nos.lol",
             "wss://relay.nsec.app"
           ],
-          "description": "List of Nostr relay WebSocket URLs to connect to."
+          "scope": "machine",
+          "markdownDescription": "Nostr relay WebSocket URLs used for the NIP-46 signer connection. **Machine-scoped**: only your User settings can change it, never a workspace's `.vscode/settings.json`, so a repo can't redirect signer traffic to attacker-controlled relays. Entries must be `wss://` (or `ws://localhost` for local development); others are ignored."
         }
       }
     },

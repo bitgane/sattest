@@ -118,38 +118,67 @@ describe('state', () => {
   });
 
   describe('getNostrRelays', () => {
-    it('returns default relays when no user config', () => {
+    const DEFAULTS = [
+      'wss://relay.damus.io',
+      'wss://relay.primal.net',
+      'wss://nos.lol',
+      'wss://relay.nsec.app',
+    ];
+
+    /** Mock getConfiguration().inspect('nostrRelays') to return `result`. */
+    function mockInspect(result: Record<string, unknown> | undefined) {
       (vscode.workspace.getConfiguration as jest.Mock).mockReturnValue({
-        get: jest.fn().mockReturnValue(undefined),
+        get: jest.fn(),
+        inspect: jest.fn().mockReturnValue(result),
       });
-      const relays = getNostrRelays();
-      expect(relays).toEqual([
-        'wss://relay.damus.io',
-        'wss://relay.primal.net',
-        'wss://nos.lol',
-        'wss://relay.nsec.app',
-      ]);
+    }
+
+    it('returns the package default when there is no user value', () => {
+      mockInspect({ defaultValue: DEFAULTS });
+      expect(getNostrRelays()).toEqual(DEFAULTS);
     });
 
-    it('returns default relays when user config is empty array', () => {
-      (vscode.workspace.getConfiguration as jest.Mock).mockReturnValue({
-        get: jest.fn().mockReturnValue([]),
-      });
-      const relays = getNostrRelays();
-      expect(relays).toEqual([
-        'wss://relay.damus.io',
-        'wss://relay.primal.net',
-        'wss://nos.lol',
-        'wss://relay.nsec.app',
-      ]);
+    it('falls back to defaults when inspect returns nothing', () => {
+      mockInspect(undefined);
+      expect(getNostrRelays()).toEqual(DEFAULTS);
     });
 
-    it('returns user-configured relays', () => {
-      (vscode.workspace.getConfiguration as jest.Mock).mockReturnValue({
-        get: jest.fn().mockReturnValue(['wss://custom-relay.example.com']),
+    it('falls back to defaults when the user value is an empty array', () => {
+      mockInspect({ globalValue: [], defaultValue: DEFAULTS });
+      expect(getNostrRelays()).toEqual(DEFAULTS);
+    });
+
+    it('returns user-configured wss relays', () => {
+      mockInspect({ globalValue: ['wss://custom-relay.example.com'] });
+      expect(getNostrRelays()).toEqual(['wss://custom-relay.example.com']);
+    });
+
+    it('drops non-wss / malformed entries and keeps the valid ones', () => {
+      mockInspect({
+        globalValue: [
+          'wss://good.example.com',
+          'http://evil.example.com',
+          'ws://evil.example.com',
+          'not-a-url',
+          'ws://localhost:7777',
+        ],
       });
-      const relays = getNostrRelays();
-      expect(relays).toEqual(['wss://custom-relay.example.com']);
+      expect(getNostrRelays()).toEqual(['wss://good.example.com', 'ws://localhost:7777']);
+    });
+
+    it('falls back to defaults when every configured entry is invalid', () => {
+      mockInspect({ globalValue: ['http://evil.example.com', 'garbage'], defaultValue: DEFAULTS });
+      expect(getNostrRelays()).toEqual(DEFAULTS);
+    });
+
+    // Security: a workspace must not be able to redirect signer traffic.
+    it('IGNORES a workspace-provided relay list, using the user value', () => {
+      mockInspect({
+        globalValue: ['wss://real.example.com'],
+        workspaceValue: ['wss://evil.example.com'],
+        workspaceFolderValue: ['wss://evil.example.com'],
+      });
+      expect(getNostrRelays()).toEqual(['wss://real.example.com']);
     });
   });
 

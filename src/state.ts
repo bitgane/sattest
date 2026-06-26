@@ -66,12 +66,43 @@ export async function setNostrAuthEvent(value: string): Promise<void> {
   await getContext().secrets.store(NOSTR_AUTH_EVENT, value);
 }
 
-// Nostr relays
+/** True for a relay URL we'll connect to: wss anywhere, ws only on localhost. */
+function isSafeRelayUrl(value: unknown): value is string {
+  if (typeof value !== 'string') {
+    return false;
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol === 'wss:') {
+    return true;
+  }
+  if (parsed.protocol === 'ws:') {
+    const host = parsed.hostname;
+    return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]';
+  }
+  return false;
+}
+
+// Nostr relays.
+//
+// Security: `nostrRelays` is declared `machine`-scoped in package.json, and we
+// defensively read only the user (global) value or the built-in default via
+// `inspect()` — never a workspace/folder-provided list. This stops a malicious
+// repo's `.vscode/settings.json` from pointing NIP-46 signer traffic at
+// attacker-controlled relays. Each entry must be wss:// (or ws://localhost for
+// local development); invalid entries are dropped, and an empty result falls
+// back to the defaults.
 export const getNostrRelays = (): string[] => {
   const config = vscode.workspace.getConfiguration('sattest');
-  const userRelays = config.get<string[]>('nostrRelays');
-  if (userRelays && userRelays.length > 0) {
-    return userRelays;
+  const inspected = config.inspect<string[]>('nostrRelays');
+  const candidate = inspected?.globalValue ?? inspected?.defaultValue;
+  const relays = Array.isArray(candidate) ? candidate.filter(isSafeRelayUrl) : [];
+  if (relays.length > 0) {
+    return relays;
   }
   return DEFAULT_NOSTR_RELAYS;
 };

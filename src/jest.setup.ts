@@ -53,6 +53,9 @@ jest.mock('vscode', () => {
   const mockConfiguration = {
     get: jest.fn().mockReturnValue(undefined),
     update: jest.fn().mockResolvedValue(undefined),
+    // getBackendUrl() reads via inspect() so it can ignore workspace-provided
+    // values. Default to undefined so callers fall back to the localhost default.
+    inspect: jest.fn().mockReturnValue(undefined),
   };
 
   const mockWorkspace = {

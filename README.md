@@ -121,7 +121,6 @@ The original custodial flow — pay a BOLT11 invoice / QR up front, funds held s
 
 | Setting               | Default                                            | Description                          |
 | --------------------- | -------------------------------------------------- | ------------------------------------ |
-| `sattest.backendUrl`  | `https://sattest-backend-production.up.railway.app` | URL of the Sattest backend           |
 | `sattest.nostrRelays` | `relay.damus.io`, `relay.primal.net`, `nos.lol`, `relay.nsec.app` | Nostr relay WebSocket URLs |
 | `sattest.apiKey`      | (empty)                                            | API key for backend authentication   |
 
