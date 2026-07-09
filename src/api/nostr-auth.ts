@@ -1,4 +1,6 @@
-import { getNostrAuthEvent, getNostrWriteAuthEvent } from '../state.js';
+import { getNostrAuthEvent } from '../state.js';
+import { getBackendUrl } from './config.js';
+import { signMoneyAuthEvent } from './nostr.api.js';
 
 /**
  * Returns headers for authenticating requests to the sattest backend
@@ -8,21 +10,8 @@ import { getNostrAuthEvent, getNostrWriteAuthEvent } from '../state.js';
  * The backend verifies the event signature to authenticate the user's pubkey.
  */
 
-async function buildAuthHeaders(
-  getEvent: () => Promise<string | undefined>,
-  scopeLabel: string,
-  extra?: Record<string, string>
-): Promise<Record<string, string>> {
-  const eventJson = await getEvent();
-
-  if (!eventJson) {
-    throw new Error(
-      `Nostr authentication required (${scopeLabel} scope). Use "Connect Nostr" (Ctrl+Alt+N) first.`
-    );
-  }
-
-  const encoded = Buffer.from(eventJson).toString('base64');
-
+function encodeAuthHeader(event: object, extra?: Record<string, string>): Record<string, string> {
+  const encoded = Buffer.from(JSON.stringify(event)).toString('base64');
   return {
     Authorization: `Nostr ${encoded}`,
     ...extra,
@@ -33,18 +22,51 @@ async function buildAuthHeaders(
 export async function getNostrAuthHeaders(
   extra?: Record<string, string>
 ): Promise<Record<string, string>> {
-  return buildAuthHeaders(getNostrAuthEvent, 'read', extra);
+  const eventJson = await getNostrAuthEvent();
+  if (!eventJson) {
+    throw new Error(
+      'Nostr authentication required (read scope). Use "Connect Nostr" (Ctrl+Alt+N) first.'
+    );
+  }
+  return encodeAuthHeader(JSON.parse(eventJson), extra);
+}
+
+/**
+ * Fetches a short-lived, single-use nonce from the backend (F4 hardening).
+ * Uses the cheap, reusable read credential — issuing a nonce never requires
+ * a signer round-trip, only the money call that follows does.
+ */
+async function fetchAuthNonce(): Promise<string> {
+  const readHeaders = await getNostrAuthHeaders();
+  const response = await fetch(`${getBackendUrl()}/auth/nonce`, {
+    method: 'POST',
+    headers: readHeaders,
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to obtain auth nonce: backend returned ${response.status}`);
+  }
+  const data = (await response.json()) as { nonce?: string };
+  if (!data.nonce) {
+    throw new Error('Backend did not return a nonce');
+  }
+  return data.nonce;
 }
 
 /**
  * Headers for money-moving endpoints (`moneyAuth` middleware).
  *
- * Uses the write-scoped credential (`content: 'sattest-auth:write'`) signed
- * at connect time. The backend rejects read credentials on these paths, so
- * a captured read-path auth event cannot be replayed against `/approve` etc.
+ * Unlike the read credential, this is NOT cached: `moneyAuth` requires a
+ * server-issued, single-use nonce (F4 hardening), so every money-moving call
+ * fetches a fresh nonce and signs a brand-new write-scope credential
+ * (`content: 'sattest-auth:write'`) bound to it. This costs a signer
+ * round-trip per money call, in exchange for a captured write credential no
+ * longer being replayable — the nonce that gave it validity is consumed on
+ * first use.
  */
 export async function getNostrMoneyAuthHeaders(
   extra?: Record<string, string>
 ): Promise<Record<string, string>> {
-  return buildAuthHeaders(getNostrWriteAuthEvent, 'write', extra);
+  const nonce = await fetchAuthNonce();
+  const event = await signMoneyAuthEvent(nonce);
+  return encodeAuthHeader(event, extra);
 }

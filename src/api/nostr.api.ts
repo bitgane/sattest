@@ -176,16 +176,22 @@ function renderConnectedSuccess(panel: vscode.WebviewPanel, userHandle: string):
   `;
 }
 import {
+  getNostrBunkerPointer,
   getNostrClientSecret,
   getNostrRelays,
   getNostrUserHandle,
   getNostrUserPubkey,
   setNostrAuthEvent,
-  setNostrWriteAuthEvent,
+  setNostrBunkerPointer,
   setNostrClientSecret,
   setNostrUserHandle,
   setNostrUserPubkey,
 } from '../state.js';
+import type { BunkerPointer } from 'nostr-tools/nip46';
+import type { VerifiedEvent } from 'nostr-tools';
+
+/** Content string for the write-scope credential required by the backend's `moneyAuth`. */
+export const WRITE_AUTH_CONTENT = 'sattest-auth:write';
 
 export async function connectNostr(
   context: vscode.ExtensionContext,
@@ -511,11 +517,13 @@ export async function resolveNostrInfoFromBunkerSigner(
     // Handshake accepted — build the signer session directly from the bunker
     // pointer. Unlike fromURI this doesn't re-wait for anything; it just wires
     // up the conversation with the pubkey that answered our QR.
-    const bunker = BunkerSigner.fromBunker(
-      clientSecretBytes,
-      { pubkey: remoteSignerPubkey, relays, secret },
-      { pool }
-    );
+    const bunkerPointer: BunkerPointer = { pubkey: remoteSignerPubkey, relays, secret };
+    const bunker = BunkerSigner.fromBunker(clientSecretBytes, bunkerPointer, { pool });
+
+    // Persist the pointer (F4 hardening) so `signMoneyAuthEvent` can rebuild a
+    // signer session on demand for each money-moving call, without asking the
+    // user to scan the connect QR again every time.
+    await setNostrBunkerPointer(JSON.stringify(bunkerPointer));
 
     const userPubkey = await bunker.getPublicKey();
 
@@ -542,14 +550,20 @@ export async function resolveNostrInfoFromBunkerSigner(
       }
     }
 
-    // Sign two scope-separated auth credentials for backend API authentication
-    // (NIP-42 kind 22242, M1 hardening). Signing both at connect time avoids
-    // requiring an interactive signer round-trip on every write operation.
+    // Sign the read-scope auth credential for backend API authentication
+    // (NIP-42 kind 22242, M1 hardening). Signed once at connect time and
+    // reused for the lifetime of its freshness window — reads are
+    // non-destructive, so avoiding a signer round-trip on every read is worth
+    // the bounded replay window (`content: 'sattest-auth'`, accepted by
+    // nostrAuth).
     //
-    // READ credential  (`content: 'sattest-auth'`)       — accepted by nostrAuth
-    // WRITE credential (`content: 'sattest-auth:write'`) — required by moneyAuth
+    // The write-scope credential (`content: 'sattest-auth:write'`, required
+    // by moneyAuth) is NOT signed here. Since moneyAuth requires a
+    // server-issued single-use nonce (F4 hardening), a write credential must
+    // be signed fresh per money-moving call — see `signMoneyAuthEvent` below,
+    // which reuses the persisted bunker pointer to do that on demand.
     //
-    // The `relay` tag binds each credential to this backend (AUTH_AUDIENCE): a
+    // The `relay` tag binds the credential to this backend (AUTH_AUDIENCE): a
     // harvested event can't be replayed against a different server.
     const backendUrl = getBackendUrl();
     updateStatus('Signing auth credentials...', '#007acc');
@@ -564,18 +578,6 @@ export async function resolveNostrInfoFromBunkerSigner(
     });
     await setNostrAuthEvent(JSON.stringify(signedAuthEvent));
 
-    const signedWriteAuthEvent = await bunker.signEvent({
-      kind: 22242,
-      created_at: Math.floor(Date.now() / 1000),
-      tags: [
-        ['challenge', 'sattest-auth:write'],
-        ['relay', backendUrl],
-      ],
-      content: 'sattest-auth:write',
-    });
-    await setNostrWriteAuthEvent(JSON.stringify(signedWriteAuthEvent));
-
-    // Save both
     await setNostrUserPubkey(userPubkey);
     await setNostrUserHandle(userHandle);
 
@@ -613,4 +615,49 @@ function hexToBytes(hex: string): Uint8Array {
     bytes[i / 2] = parseInt(hex.substr(i, 2), 16);
   }
   return bytes;
+}
+
+/**
+ * Signs a fresh write-scope NIP-42 auth event bound to `nonce` (F4
+ * hardening). The backend's `moneyAuth` middleware requires a server-issued,
+ * single-use nonce on every money-moving call, so — unlike the read
+ * credential — this can't be signed once and cached; it's minted per call.
+ *
+ * Rebuilds a `BunkerSigner` from the persisted client secret + bunker
+ * pointer (saved by `connectNostr`) rather than reusing a long-lived session
+ * object, since the extension may call this long after the original connect
+ * flow completed and doesn't keep a signer connection open in the meantime.
+ *
+ * Throws if no identity is connected yet — callers (see `nostr-auth.ts`)
+ * treat that the same as an expired session and can trigger the same
+ * interactive-reconnect flow used elsewhere.
+ */
+export async function signMoneyAuthEvent(nonce: string): Promise<VerifiedEvent> {
+  const clientSecretHex = await getNostrClientSecret();
+  const bunkerPointerJson = await getNostrBunkerPointer();
+  if (!clientSecretHex || !bunkerPointerJson) {
+    throw new Error(
+      'Nostr authentication required (write scope). Use "Connect Nostr" (Ctrl+Alt+N) first.'
+    );
+  }
+
+  const clientSecretBytes = hexToBytes(clientSecretHex);
+  const bunkerPointer: BunkerPointer = JSON.parse(bunkerPointerJson);
+  const pool = new SimplePool();
+  try {
+    const bunker = BunkerSigner.fromBunker(clientSecretBytes, bunkerPointer, { pool });
+    const backendUrl = getBackendUrl();
+    return await bunker.signEvent({
+      kind: 22242,
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [
+        ['challenge', WRITE_AUTH_CONTENT],
+        ['nonce', nonce],
+        ['relay', backendUrl],
+      ],
+      content: WRITE_AUTH_CONTENT,
+    });
+  } finally {
+    pool.close(bunkerPointer.relays);
+  }
 }

@@ -8,6 +8,7 @@ jest.mock('nostr-tools', () => {
     ensureRelay: jest.fn().mockResolvedValue(undefined),
     get: jest.fn().mockResolvedValue(null),
     subscribe: jest.fn().mockReturnValue({ close: jest.fn() }),
+    close: jest.fn(),
   };
   return {
     generateSecretKey: jest.fn().mockReturnValue(new Uint8Array(32).fill(1)),
@@ -41,7 +42,8 @@ jest.mock('../state', () => ({
   setNostrClientSecret: jest.fn().mockResolvedValue(undefined),
   getNostrRelays: jest.fn().mockReturnValue(['wss://relay.test.com']),
   setNostrAuthEvent: jest.fn().mockResolvedValue(undefined),
-  setNostrWriteAuthEvent: jest.fn().mockResolvedValue(undefined),
+  getNostrBunkerPointer: jest.fn().mockResolvedValue(undefined),
+  setNostrBunkerPointer: jest.fn().mockResolvedValue(undefined),
   setNostrUserPubkey: jest.fn().mockResolvedValue(undefined),
   setNostrUserHandle: jest.fn().mockResolvedValue(undefined),
   // Default to "no identity" so the connected-banner branch in connectNostr
@@ -51,10 +53,10 @@ jest.mock('../state', () => ({
   initializeSecrets: jest.fn(),
 }));
 
-import { connectNostr, resolveNostrInfoFromBunkerSigner } from './nostr.api.js';
+import { connectNostr, resolveNostrInfoFromBunkerSigner, signMoneyAuthEvent } from './nostr.api.js';
 import { BunkerSigner } from 'nostr-tools/nip46';
 import { SimplePool, nip44 } from 'nostr-tools';
-import { getNostrClientSecret } from '../state.js';
+import { getNostrClientSecret, getNostrBunkerPointer } from '../state.js';
 
 // The SimplePool mock returns a shared singleton — grab it for driving the
 // handshake subscription from tests.
@@ -62,6 +64,7 @@ const sharedPool = new SimplePool() as unknown as {
   ensureRelay: jest.Mock;
   get: jest.Mock;
   subscribe: jest.Mock;
+  close: jest.Mock;
 };
 
 /** Make the signer handshake fail immediately (subscribe throws). */
@@ -414,6 +417,22 @@ describe('resolveNostrInfoFromBunkerSigner', () => {
     expect(relayTag).toBeDefined();
     expect(typeof relayTag[1]).toBe('string');
     expect(relayTag[1]).toMatch(/^https?:\/\//);
+
+    // Only the read credential is signed at connect time (F4: the write
+    // credential is minted per money call, not cached — see signMoneyAuthEvent
+    // below). Exactly one signEvent call happened here.
+    expect(signEvent).toHaveBeenCalledTimes(1);
+    expect(signedArg.content).toBe('sattest-auth');
+
+    // The bunker pointer is persisted so signMoneyAuthEvent can rebuild a
+    // signer session later without re-scanning the connect QR.
+    const { setNostrBunkerPointer } = require('../state');
+    expect(setNostrBunkerPointer).toHaveBeenCalledTimes(1);
+    const persistedPointer = JSON.parse((setNostrBunkerPointer as jest.Mock).mock.calls[0][0]);
+    expect(persistedPointer).toMatchObject({
+      pubkey: 'remote-signer-pubkey',
+      relays: ['wss://relay.test.com'],
+    });
   });
 
   it('rewrites the panel to a minimal "Connected as <handle>" success view on pairing', async () => {
@@ -606,5 +625,73 @@ describe('resolveNostrInfoFromBunkerSigner', () => {
     );
 
     expect(result?.userHandle).toBe('@alice');
+  });
+});
+
+// ── F4: per-money-call nonce-bound write credential ─────────────────────────
+describe('signMoneyAuthEvent', () => {
+  const CLIENT_SECRET_HEX = 'ab'.repeat(32);
+  const BUNKER_POINTER = {
+    pubkey: 'remote-signer-pubkey',
+    relays: ['wss://relay.test.com'],
+    secret: 'connect-secret',
+  };
+
+  beforeEach(() => {
+    (getNostrClientSecret as jest.Mock).mockReset().mockResolvedValue(CLIENT_SECRET_HEX);
+    (getNostrBunkerPointer as jest.Mock)
+      .mockReset()
+      .mockResolvedValue(JSON.stringify(BUNKER_POINTER));
+    (BunkerSigner.fromBunker as jest.Mock).mockReset();
+    sharedPool.close.mockReset();
+  });
+
+  it('signs a write-scope event carrying the nonce, then closes the pool', async () => {
+    const signedEvent = { kind: 22242, content: 'sattest-auth:write', sig: 'fake-sig' };
+    const signEvent = jest.fn().mockResolvedValue(signedEvent);
+    (BunkerSigner.fromBunker as jest.Mock).mockReturnValue({ signEvent });
+
+    const result = await signMoneyAuthEvent('server-nonce-abc');
+
+    expect(result).toBe(signedEvent);
+    expect(BunkerSigner.fromBunker).toHaveBeenCalledWith(
+      expect.anything(),
+      BUNKER_POINTER,
+      expect.objectContaining({ pool: expect.anything() })
+    );
+
+    const signedArg = signEvent.mock.calls[0][0];
+    expect(signedArg.kind).toBe(22242);
+    expect(signedArg.content).toBe('sattest-auth:write');
+    expect(signedArg.tags).toContainEqual(['nonce', 'server-nonce-abc']);
+    expect(signedArg.tags).toContainEqual(['challenge', 'sattest-auth:write']);
+    const relayTag = signedArg.tags.find((t: string[]) => t[0] === 'relay');
+    expect(relayTag?.[1]).toMatch(/^https?:\/\//);
+
+    // Pool is torn down after signing — this isn't a long-lived session.
+    expect(sharedPool.close).toHaveBeenCalledWith(BUNKER_POINTER.relays);
+  });
+
+  it('closes the pool even when signing throws', async () => {
+    (BunkerSigner.fromBunker as jest.Mock).mockReturnValue({
+      signEvent: jest.fn().mockRejectedValue(new Error('signer rejected')),
+    });
+
+    await expect(signMoneyAuthEvent('n')).rejects.toThrow('signer rejected');
+    expect(sharedPool.close).toHaveBeenCalledWith(BUNKER_POINTER.relays);
+  });
+
+  it('throws without signing when no client secret is stored', async () => {
+    (getNostrClientSecret as jest.Mock).mockResolvedValue(undefined);
+
+    await expect(signMoneyAuthEvent('n')).rejects.toThrow('Nostr authentication required');
+    expect(BunkerSigner.fromBunker).not.toHaveBeenCalled();
+  });
+
+  it('throws without signing when no bunker pointer is persisted', async () => {
+    (getNostrBunkerPointer as jest.Mock).mockResolvedValue(undefined);
+
+    await expect(signMoneyAuthEvent('n')).rejects.toThrow('Nostr authentication required');
+    expect(BunkerSigner.fromBunker).not.toHaveBeenCalled();
   });
 });

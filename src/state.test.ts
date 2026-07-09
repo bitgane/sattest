@@ -9,6 +9,8 @@ import {
   setNostrUserHandle,
   getNostrAuthEvent,
   setNostrAuthEvent,
+  getNostrBunkerPointer,
+  setNostrBunkerPointer,
   getNostrRelays,
   getLnbitsUrl,
   setLnbitsUrl,
@@ -114,6 +116,24 @@ describe('state', () => {
       await setNostrAuthEvent(event);
       const result = await getNostrAuthEvent();
       expect(result).toBe(event);
+    });
+  });
+
+  describe('Nostr bunker pointer', () => {
+    it('returns undefined when no pointer stored', async () => {
+      const result = await getNostrBunkerPointer();
+      expect(result).toBeUndefined();
+    });
+
+    it('stores and retrieves the bunker pointer', async () => {
+      const pointer = JSON.stringify({
+        pubkey: 'remote-signer-pubkey',
+        relays: ['wss://relay.test.com'],
+        secret: 'connect-secret',
+      });
+      await setNostrBunkerPointer(pointer);
+      const result = await getNostrBunkerPointer();
+      expect(result).toBe(pointer);
     });
   });
 

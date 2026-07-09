@@ -19,7 +19,7 @@ const NOSTR_CLIENT_SECRET_KEY = 'nostr_client_secret_hex';
 const NOSTR_USER_PUBKEY = 'nostr_user_pubkey';
 const NOSTR_USER_HANDLE = 'nostr_user_handle';
 const NOSTR_AUTH_EVENT = 'nostr_auth_event';
-const NOSTR_WRITE_AUTH_EVENT = 'nostr_write_auth_event';
+const NOSTR_BUNKER_POINTER = 'nostr_bunker_pointer';
 const DEFAULT_NOSTR_RELAYS = [
   'wss://relay.damus.io',
   'wss://relay.primal.net',
@@ -67,13 +67,16 @@ export async function setNostrAuthEvent(value: string): Promise<void> {
   await getContext().secrets.store(NOSTR_AUTH_EVENT, value);
 }
 
-// Nostr write auth event (write-scoped, for money-moving endpoints)
-export async function getNostrWriteAuthEvent(): Promise<string | undefined> {
-  return getContext().secrets.get(NOSTR_WRITE_AUTH_EVENT);
+// Bunker pointer (remote signer pubkey, relays, connect secret) — persisted so
+// money-moving calls can reconstruct a signer session and sign a fresh,
+// nonce-bound write credential per request (F4 hardening) without re-scanning
+// the connect QR every time.
+export async function getNostrBunkerPointer(): Promise<string | undefined> {
+  return getContext().secrets.get(NOSTR_BUNKER_POINTER);
 }
 
-export async function setNostrWriteAuthEvent(value: string): Promise<void> {
-  await getContext().secrets.store(NOSTR_WRITE_AUTH_EVENT, value);
+export async function setNostrBunkerPointer(value: string): Promise<void> {
+  await getContext().secrets.store(NOSTR_BUNKER_POINTER, value);
 }
 
 /** True for a relay URL we'll connect to: wss anywhere, ws only on localhost. */
