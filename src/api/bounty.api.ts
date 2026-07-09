@@ -445,9 +445,13 @@ export async function getPendingClaim(
       `${getBackendUrl()}/bounties/${encodeURIComponent(bountyId)}/pending-claim`,
       { method: 'GET' }
     );
-    if (!response.ok) return null;
+    if (!response.ok) {
+      return null;
+    }
     const data = await response.json();
-    if (!data?.id || !data?.claimantLnurl) return null;
+    if (!data?.id || !data?.claimantLnurl) {
+      return null;
+    }
     return data as { id: string; claimantLnurl: string; claimedAt: string; status: string };
   } catch {
     return null;
