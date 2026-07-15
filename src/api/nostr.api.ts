@@ -193,19 +193,19 @@ import type { VerifiedEvent } from 'nostr-tools';
 /** Content string for the write-scope credential required by the backend's `moneyAuth`. */
 export const WRITE_AUTH_CONTENT = 'sattest-auth:write';
 
+/**
+ * Per-relay connection timeout. A relay that can't complete its WebSocket
+ * handshake in this window is treated as down and skipped — it must not stall
+ * the connect flow (see the Promise.allSettled dial in connectNostr).
+ */
+const RELAY_CONNECT_TIMEOUT_MS = 5000;
+
 export async function connectNostr(
   context: vscode.ExtensionContext,
   onBountiesChangedEmitter: vscode.EventEmitter<void>,
   opts?: {
-    /** Generic call-to-action shown when no identity is connected. */
+    /** Call-to-action banner shown above the QR (e.g. session-expired notices). */
     noticeMessage?: string;
-    /**
-     * Identity-aware variant. When a Nostr identity is already connected and
-     * this is provided, it's used instead of `noticeMessage` (and the separate
-     * green "Connected as" banner is suppressed). The caller owns the wording;
-     * connectNostr supplies the handle/short-pubkey.
-     */
-    noticeMessageWithIdentity?: (identity: string) => string;
   }
 ): Promise<{ userPubkey: string; userHandle: string } | undefined> {
   const pool = new SimplePool();
@@ -219,7 +219,64 @@ export async function connectNostr(
     { enableScripts: true, localResourceRoots: [], enableForms: false, enableCommandUris: false }
   );
 
-  await Promise.all(relays.map((url) => pool.ensureRelay(url)));
+  // Paint a bare "connecting" page immediately so the panel is never blank
+  // while relays are dialed (the fuller placeholder with banners repaints
+  // below, before the QR is revealed).
+  panel.webview.html = `
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';">
+            <title>Connect to Nostr</title>
+            <style>body { font-family: monospace; padding: 20px; background: #f5f5f5; color: #333; text-align: center; }</style>
+        </head>
+        <body>
+            <h2>Connect to Nostr</h2>
+            <p>Connecting to Nostr relays…</p>
+        </body>
+        </html>
+    `;
+
+  // Dial the configured relays in parallel, tolerating individual failures —
+  // a single dead or slow relay must not kill the whole connect flow. Only
+  // relays that actually connected are advertised in the nostrconnect:// URI,
+  // so the signer never publishes its response somewhere we aren't listening.
+  const relayResults = await Promise.allSettled(
+    relays.map((url) => pool.ensureRelay(url, { connectionTimeout: RELAY_CONNECT_TIMEOUT_MS }))
+  );
+  const liveRelays = relays.filter((_, i) => relayResults[i].status === 'fulfilled');
+  const failedRelays = relays.filter((_, i) => relayResults[i].status === 'rejected');
+  if (failedRelays.length > 0) {
+    console.warn(
+      `[connectNostr] Skipping unreachable relays: ${failedRelays.join(', ')} — continuing with ${liveRelays.length} relay(s)`
+    );
+  }
+  if (liveRelays.length === 0) {
+    panel.webview.html = `
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';">
+            <title>Connect to Nostr</title>
+            <style>
+            body { font-family: monospace; padding: 20px; background: #f5f5f5; color: #333; text-align: center; }
+            .error { background: #fdecea; border: 1px solid #f5c6cb; color: #721c24; padding: 12px; border-radius: 4px; line-height: 1.5; }
+            </style>
+        </head>
+        <body>
+            <h2>Connect to Nostr</h2>
+            <div class="error">Could not reach any configured Nostr relay:<br>${relays.map(escapeHtml).join('<br>')}<br><br>Check your network, or adjust the <b>sattest.nostrRelays</b> setting.</div>
+        </body>
+        </html>
+    `;
+    vscode.window.showErrorMessage(
+      `Could not reach any configured Nostr relay (${relays.join(', ')}). Check your network or the sattest.nostrRelays setting.`
+    );
+    return undefined;
+  }
+
   // Load or generate client secret
   let clientSecretHex = await getNostrClientSecret();
   let clientSecretBytes: Uint8Array;
@@ -237,7 +294,7 @@ export async function connectNostr(
   // Create URI
   const connectionUri = createNostrConnectURI({
     clientPubkey,
-    relays,
+    relays: liveRelays,
     secret: bytesToHex(generateSecretKey()),
     name: 'Sattest',
   });
@@ -250,9 +307,7 @@ export async function connectNostr(
     qrSvg = '<p>QR generation failed – copy URI below</p>';
   }
 
-  // Resolve the connected identity once — the handle if known, otherwise a
-  // shortened pubkey. Used by both the green "Connected as" banner and the
-  // identity-aware notice below.
+  // Resolve the connected identity once, for the green "Connected as" banner.
   const currentHandle = await getNostrUserHandle();
   const currentPubkey = await getNostrUserPubkey();
   const identityDisplay = currentPubkey
@@ -262,25 +317,19 @@ export async function connectNostr(
     : undefined;
 
   // Optional call-to-action banner — shown when the panel is opened mid-flow to
-  // recover an expired session (e.g. completing an NWC wallet connection). When
-  // an identity is connected and the caller provides an identity-aware variant,
-  // fold the handle/pubkey into the notice itself rather than also showing the
-  // separate green "Connected as" banner.
-  const noticeText =
-    identityDisplay && opts?.noticeMessageWithIdentity
-      ? opts.noticeMessageWithIdentity(identityDisplay)
-      : opts?.noticeMessage;
+  // recover an expired session (e.g. completing an NWC wallet connection).
+  // Never tied to whichever identity was previously connected: any Nostr
+  // identity may complete this flow, so the notice stays generic.
+  const noticeText = opts?.noticeMessage;
   const noticeBannerHtml = noticeText
     ? `<div class="notice-action">${escapeHtml(noticeText)}</div>`
     : '';
 
-  // Green "Connected as" banner — only when we're NOT already showing the
-  // notice (the notice carries the identity in the re-auth flow, so a second
-  // banner would be redundant).
-  const connectedBannerHtml =
-    identityDisplay && !noticeText
-      ? `<div class="connected">Connected as ${escapeHtml(identityDisplay)}</div>`
-      : '';
+  // Green "Connected as" banner — shown whenever an identity is already
+  // connected, independent of the notice above.
+  const connectedBannerHtml = identityDisplay
+    ? `<div class="connected">Connected as ${escapeHtml(identityDisplay)}</div>`
+    : '';
 
   // Full QR view — built now but NOT painted yet. We reveal it only after the
   // signer-response subscription has had a moment to go live (see below), so
@@ -428,7 +477,7 @@ export async function connectNostr(
   const nostrConnection = await resolveNostrInfoFromBunkerSigner(
     clientSecretBytes,
     connectionUri,
-    relays,
+    liveRelays,
     pool,
     context,
     panel,

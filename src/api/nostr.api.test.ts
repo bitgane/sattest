@@ -219,7 +219,6 @@ describe('connectNostr', () => {
 
     await connectNostr(mockContext, mockEmitter, {
       noticeMessage: 'Refresh your Nostr login to complete your wallet connection.',
-      noticeMessageWithIdentity: (id) => `Refresh your Nostr connection as ${id} to complete your wallet connection.`,
     });
 
     const html = (vscode.window.createWebviewPanel as jest.Mock).mock.results.at(-1)!.value
@@ -230,7 +229,7 @@ describe('connectNostr', () => {
     expect(html).not.toContain('class="connected"');
   });
 
-  it('folds the identity into the yellow notice and suppresses the green banner', async () => {
+  it('shows the generic notice alongside the "Connected as" banner when an identity is already active', async () => {
     const state = require('../state');
     (state.getNostrUserPubkey as jest.Mock).mockResolvedValue('a'.repeat(64));
     (state.getNostrUserHandle as jest.Mock).mockResolvedValue('bitgane');
@@ -238,35 +237,17 @@ describe('connectNostr', () => {
 
     await connectNostr(mockContext, mockEmitter, {
       noticeMessage: 'Refresh your Nostr login to complete your wallet connection.',
-      noticeMessageWithIdentity: (id) => `Refresh your Nostr connection as ${id} to complete your wallet connection.`,
     });
 
     const html = (vscode.window.createWebviewPanel as jest.Mock).mock.results.at(-1)!.value
       .webview.html as string;
-    // Identity folded into the yellow notice…
+    // The notice stays generic — connecting here is never tied to the
+    // already-paired identity, so any Nostr identity may complete it.
     expect(html).toContain('class="notice-action"');
-    expect(html).toContain('Refresh your Nostr connection as @bitgane to complete your wallet connection.');
-    // …and the separate green "Connected as" banner is suppressed.
-    expect(html).not.toContain('class="connected"');
-    expect(html).not.toContain('Connected as');
-  });
-
-  it('falls back to a shortened pubkey in the notice when no handle is set', async () => {
-    const state = require('../state');
-    const pk = 'b'.repeat(64);
-    (state.getNostrUserPubkey as jest.Mock).mockResolvedValue(pk);
-    (state.getNostrUserHandle as jest.Mock).mockResolvedValue(undefined);
-    handshakeFails();
-
-    await connectNostr(mockContext, mockEmitter, {
-      noticeMessage: 'Refresh your Nostr login to complete your wallet connection.',
-      noticeMessageWithIdentity: (id) => `Refresh your Nostr connection as ${id} to complete your wallet connection.`,
-    });
-
-    const html = (vscode.window.createWebviewPanel as jest.Mock).mock.results.at(-1)!.value
-      .webview.html as string;
-    expect(html).toContain(`Refresh your Nostr connection as ${pk.slice(0, 8)}…${pk.slice(-4)} to complete your wallet connection.`);
-    expect(html).not.toContain('class="connected"');
+    expect(html).toContain('Refresh your Nostr login to complete your wallet connection.');
+    // The green "Connected as" banner still shows, independent of the notice.
+    expect(html).toContain('class="connected"');
+    expect(html).toContain('Connected as @bitgane');
   });
 
   it('omits the notice-action banner when no noticeMessage is provided', async () => {

@@ -32,7 +32,6 @@ export async function activate(context: vscode.ExtensionContext) {
   setAuthRefresher(async () =>
     !!(await connectNostr(context, onBountiesChangedEmitter, {
       noticeMessage: 'Your Nostr session expired — reconnect to continue.',
-      noticeMessageWithIdentity: (id) => `Reconnect as ${id} to continue.`,
     }))
   );
 
@@ -157,8 +156,6 @@ export async function activate(context: vscode.ExtensionContext) {
         // the user never has to re-run this command.
         const reconnected = await connectNostr(context, onBountiesChangedEmitter, {
           noticeMessage: 'Refresh your Nostr login to complete your wallet connection.',
-          noticeMessageWithIdentity: (id) =>
-            `Refresh your Nostr connection as ${id} to complete your wallet connection.`,
         });
         if (reconnected) {
           result = await setNwcUri(uri.trim(), budgetSats, windowChoice.value);
