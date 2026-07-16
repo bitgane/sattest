@@ -101,6 +101,35 @@ describe('extension', () => {
       expect(fetchBounties).toHaveBeenCalled();
     });
 
+    it('keeps the newest bounty when the backend returns duplicates for one test', async () => {
+      let addBountyHandler: Function | undefined;
+      (vscode.commands.registerCommand as jest.Mock).mockImplementation(
+        (id: string, handler: Function) => {
+          if (id === 'sattest.addBounty') {
+            addBountyHandler = handler;
+          }
+          return { dispose: jest.fn() };
+        }
+      );
+      // Backend orders createdAt desc (newest first). attachTestItems must be
+      // first-wins — last-write-wins used to leave the stale 999-sat bounty in
+      // the map, so lenses/claim/approve acted on old data.
+      (fetchBounties as jest.Mock).mockResolvedValueOnce([
+        { testId: '/t1', amountSats: 2000, active: true },
+        { testId: '/t1', amountSats: 999, active: true },
+      ]);
+
+      await activate(createMockContext());
+      expect(addBountyHandler).toBeDefined();
+
+      // The duplicate-bounty guard reads the map attachTestItems filled — it
+      // should report the newest (2000 sats) bounty.
+      await addBountyHandler!({ id: '/t1', label: 't1' });
+      expect(vscode.window.showWarningMessage).toHaveBeenCalledWith(
+        expect.stringContaining('2000')
+      );
+    });
+
     it('registers connectNostr command that calls connectNostr', async () => {
       const context = createMockContext();
       let connectHandler: Function | undefined;
@@ -478,12 +507,12 @@ describe('extension', () => {
       expect(setNwcUri).toHaveBeenCalledWith('nostr+walletconnect://abc', 100000, 'daily');
     });
 
-    it('connects without budget when user leaves sats blank', async () => {
+    it('cancels with no DB change when user dismisses the budget sats input', async () => {
       const { getNostrUserPubkey } = require('./state');
       (getNostrUserPubkey as jest.Mock).mockResolvedValue('npub-pub');
       (vscode.window.showInputBox as jest.Mock)
         .mockResolvedValueOnce('nostr+walletconnect://abc')
-        .mockResolvedValueOnce(''); // empty budget
+        .mockResolvedValueOnce(undefined); // Esc on the budget sats prompt
       (vscode.window.showQuickPick as jest.Mock).mockResolvedValue({
         label: 'Weekly',
         value: 'weekly',
@@ -493,11 +522,7 @@ describe('extension', () => {
       await handler();
 
       const { setNwcUri } = require('./api/nwc.api');
-      expect(setNwcUri).toHaveBeenCalledWith(
-        'nostr+walletconnect://abc',
-        undefined,
-        'weekly'
-      );
+      expect(setNwcUri).not.toHaveBeenCalled();
     });
 
     it('skips success toast when setNwcUri returns "failed"', async () => {
@@ -611,7 +636,7 @@ describe('extension', () => {
     });
 
     describe('budget sats validateInput', () => {
-      it('accepts blank, accepts positive ints, rejects others', async () => {
+      it('accepts positive ints, rejects blank/zero/negative/non-numeric', async () => {
         const { getNostrUserPubkey } = require('./state');
         (getNostrUserPubkey as jest.Mock).mockResolvedValue('npub-pub');
         (vscode.window.showInputBox as jest.Mock)
@@ -626,9 +651,12 @@ describe('extension', () => {
         await handler();
 
         const opts = (vscode.window.showInputBox as jest.Mock).mock.calls[1][0];
-        expect(opts.validateInput('')).toBeNull();
-        expect(opts.validateInput('  ')).toBeNull();
         expect(opts.validateInput('1000')).toBeNull();
+        expect(opts.validateInput('  100000  ')).toBeNull();
+        // A window was chosen, so blank is no longer a valid "skip" — the
+        // quick-pick's explicit Skip option is the only budget-less path.
+        expect(opts.validateInput('')).toMatch(/positive/);
+        expect(opts.validateInput('  ')).toMatch(/positive/);
         expect(opts.validateInput('0')).toMatch(/positive/);
         expect(opts.validateInput('-5')).toMatch(/positive/);
         expect(opts.validateInput('abc')).toMatch(/positive/);

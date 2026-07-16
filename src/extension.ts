@@ -129,22 +129,21 @@ export async function activate(context: vscode.ExtensionContext) {
 
       let budgetSats: number | undefined;
       if (windowChoice.value) {
+        // A window was chosen, so an amount is required — connecting without a
+        // budget is the quick-pick's explicit "Skip" option, not a blank here.
         const satsInput = await vscode.window.showInputBox({
           title: `Budget per ${windowChoice.value} window`,
           prompt: 'Sats (display only — enforced by your wallet)',
           placeHolder: 'e.g. 100000',
-          validateInput: (v) => {
-            if (!v.trim()) {
-              return null; // allow skip
-            }
-            return /^\d+$/.test(v.trim()) && Number(v.trim()) > 0
+          validateInput: (v) =>
+            /^\d+$/.test(v.trim()) && Number(v.trim()) > 0
               ? null
-              : 'Enter a positive whole number or leave blank';
-          },
+              : 'Enter a positive whole number',
         });
-        if (satsInput && satsInput.trim()) {
-          budgetSats = Number(satsInput.trim());
+        if (satsInput === undefined) {
+          return; // dismissed → cancel the whole connect, no DB change
         }
+        budgetSats = Number(satsInput.trim());
       }
 
       let result = await setNwcUri(uri.trim(), budgetSats, windowChoice.value);
@@ -256,7 +255,16 @@ export async function activate(context: vscode.ExtensionContext) {
 }
 
 function attachTestItems(backendBounties: BountyInfo[], bounties: Map<string, BountyInfo>) {
+  // The backend returns bounties newest-first. When a test somehow has more
+  // than one active bounty, keep the first (newest) — the old forEach was
+  // last-write-wins, which left the *oldest* bounty in the map and made the
+  // lens/claim/approve flows act on stale data.
+  const seenThisBatch = new Set<string>();
   backendBounties.forEach((b) => {
+    if (seenThisBatch.has(b.testId)) {
+      return;
+    }
+    seenThisBatch.add(b.testId);
     const testItem = findTestItemById(b.testId) as CustomTestItem;
     if (testItem) {
       b.testItem = testItem;

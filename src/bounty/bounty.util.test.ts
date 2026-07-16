@@ -1170,7 +1170,9 @@ describe('approveClaimCommand', () => {
 
     const mockEmitter = { fire: jest.fn() } as any;
 
-    (vscode.window.showWarningMessage as jest.Mock).mockResolvedValue('Cancel');
+    // The modal only offers 'Yes, Approve Payout' — VS Code's native Cancel
+    // (or Esc) resolves to undefined.
+    (vscode.window.showWarningMessage as jest.Mock).mockResolvedValue(undefined);
 
     approveClaimCommand(bounties, mockEmitter);
     await capturedHandler!(createMockTestItem({ id: 'test-id' }));

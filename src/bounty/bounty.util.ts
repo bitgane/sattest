@@ -153,11 +153,28 @@ export const addBountyCommand = (
             // Prefer the lightning address, then the relay host, then a generic
             // fallback (covers a backend that couldn't summarize the URI).
             const label = nwcStatus.lud16 || nwcStatus.relay || 'your connected wallet';
+            // The address shown is whatever `lud16` the wallet provider embedded
+            // in the NWC connection string at connect time — it identifies the
+            // funding wallet and is display-only (it can lag behind the alias
+            // the wallet shows you today, and payouts go to the claimer's
+            // LNURL, never to this address). Spell that out so a stale-looking
+            // address reads as "wallet identity" rather than a wrong payee.
+            const connectedAt = nwcStatus.updatedAt
+              ? new Date(nwcStatus.updatedAt).toLocaleDateString()
+              : undefined;
+            const detail = nwcStatus.lud16
+              ? `Address from your wallet's NWC connection string${
+                  connectedAt ? ` · connected ${connectedAt}` : ''
+                }`
+              : connectedAt
+                ? `Connected ${connectedAt}`
+                : undefined;
             const pick = await vscode.window.showQuickPick(
               [
                 {
                   label: `Use connected wallet — ${label}`,
                   description: nwcStatus.relay ?? '',
+                  detail,
                   value: 'existing' as const,
                 },
                 {
@@ -569,11 +586,13 @@ export const approveClaimCommand = (
     const displayLnurl =
       lnurl.length > 50 ? `${lnurl.slice(0, 24)}…${lnurl.slice(-16)}` : lnurl;
 
+    // Modal dialogs render VS Code's own Cancel button — passing an explicit
+    // 'Cancel' item here used to show two of them. Dismissal resolves to
+    // undefined, which the guard below already treats as "don't approve".
     const confirmed = await vscode.window.showWarningMessage(
       `Send ${bounty.amountSats} sats to:\n${displayLnurl}`,
       { modal: true, detail: `Bounty: "${test?.label}"` },
-      'Yes, Approve Payout',
-      'Cancel'
+      'Yes, Approve Payout'
     );
 
     if (confirmed !== 'Yes, Approve Payout') {
