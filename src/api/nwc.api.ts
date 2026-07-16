@@ -122,18 +122,25 @@ export async function setNwcUri(
   budgetWindow?: 'daily' | 'weekly' | 'monthly',
 ): Promise<SetNwcResult> {
   try {
+    // PATCH /users/me/nwc sits behind the backend's `moneyAuth` middleware
+    // (the URI is a spending grant), so it needs the write-scope credential —
+    // the cached read credential is rejected with a 401 regardless of age.
     // interactiveReauth is intentionally OFF here — the connectWallet command
     // owns a bespoke re-auth flow (wallet-specific message + URI retry), so we
     // surface the 401 as 'auth-expired' rather than letting authedFetch reconnect.
-    const response = await authedFetch(`${getBackendUrl()}/users/me/nwc`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        uri: uri.trim(),
-        ...(budgetSats !== undefined ? { budgetSats } : {}),
-        ...(budgetWindow !== undefined ? { budgetWindow } : {}),
-      }),
-    });
+    const response = await authedFetch(
+      `${getBackendUrl()}/users/me/nwc`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          uri: uri.trim(),
+          ...(budgetSats !== undefined ? { budgetSats } : {}),
+          ...(budgetWindow !== undefined ? { budgetWindow } : {}),
+        }),
+      },
+      { scope: 'write' }
+    );
 
     // 401 = the stored Nostr auth event has aged out (backend's freshness
     // window). Recoverable: the caller refreshes the session and retries with
@@ -149,6 +156,18 @@ export async function setNwcUri(
 
     return 'ok';
   } catch (error) {
+    // The write-scope auth plumbing throws (rather than returning a 401
+    // response) when no credential is stored or when the read credential used
+    // to fetch the single-use nonce has aged out. Both are recoverable by
+    // reconnecting Nostr — hand them to the caller's re-auth flow instead of
+    // dead-ending in an error toast.
+    const msg = error instanceof Error ? error.message : String(error);
+    if (
+      msg.includes('Nostr authentication required') ||
+      msg.includes('auth nonce: backend returned 401')
+    ) {
+      return 'auth-expired';
+    }
     console.error('[setNwcUri] Error:', error);
     vscode.window.showErrorMessage(
       `Failed to connect wallet: ${error instanceof Error ? error.message : 'Unknown error'}`,
@@ -160,10 +179,11 @@ export async function setNwcUri(
 /** Disconnect the caller's wallet. Silent success — surfaces a toast on failure. */
 export async function clearNwcUri(): Promise<boolean> {
   try {
+    // DELETE /users/me/nwc is also behind `moneyAuth` — write scope required.
     const response = await authedFetch(`${getBackendUrl()}/users/me/nwc`, {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json' },
-    }, { interactiveReauth: true });
+    }, { interactiveReauth: true, scope: 'write' });
 
     if (!response.ok) {
       const errText = await response.text().catch(() => '');

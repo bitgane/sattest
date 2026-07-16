@@ -5,6 +5,12 @@ jest.mock('./nostr-auth', () => ({
     Authorization: 'Nostr dGVzdC1hdXRoLWV2ZW50',
     ...extra,
   })),
+  getNostrMoneyAuthHeaders: jest
+    .fn()
+    .mockImplementation(async (extra?: Record<string, string>) => ({
+      Authorization: 'Nostr d3JpdGUtYXV0aC1ldmVudA==',
+      ...extra,
+    })),
 }));
 
 jest.mock('./config', () => ({
@@ -13,6 +19,7 @@ jest.mock('./config', () => ({
 
 import { setNwcUri, clearNwcUri, getNwcStatus, confirmBackendForNwc } from './nwc.api.js';
 import { getBackendUrl } from './config.js';
+import { getNostrAuthHeaders, getNostrMoneyAuthHeaders } from './nostr-auth.js';
 
 describe('setNwcUri', () => {
   it('PATCHes /users/me/nwc with trimmed URI and returns "ok" on success', async () => {
@@ -32,6 +39,33 @@ describe('setNwcUri', () => {
     // budget fields omitted when not provided — keeps wire format minimal
     expect(body.budgetSats).toBeUndefined();
     expect(body.budgetWindow).toBeUndefined();
+    // PATCH /users/me/nwc is a moneyAuth endpoint — must carry the
+    // write-scope credential, not the cached read one (which the backend
+    // rejects with a 401 that used to send users into a re-pair loop).
+    expect(getNostrMoneyAuthHeaders).toHaveBeenCalled();
+    expect(getNostrAuthHeaders).not.toHaveBeenCalled();
+  });
+
+  it('returns "auth-expired" when the write-auth plumbing cannot mint a credential', async () => {
+    // fetchAuthNonce throws this when the cached read credential (used to
+    // obtain the single-use nonce) has aged out — recoverable by reconnecting.
+    (getNostrMoneyAuthHeaders as jest.Mock).mockRejectedValueOnce(
+      new Error('Failed to obtain auth nonce: backend returned 401')
+    );
+
+    const result = await setNwcUri('nostr+walletconnect://x');
+    expect(result).toBe('auth-expired');
+    expect(vscode.window.showErrorMessage).not.toHaveBeenCalled();
+  });
+
+  it('returns "auth-expired" when no Nostr identity is connected', async () => {
+    (getNostrMoneyAuthHeaders as jest.Mock).mockRejectedValueOnce(
+      new Error('Nostr authentication required (write scope). Use "Connect Nostr" (Ctrl+Alt+N) first.')
+    );
+
+    const result = await setNwcUri('nostr+walletconnect://x');
+    expect(result).toBe('auth-expired');
+    expect(vscode.window.showErrorMessage).not.toHaveBeenCalled();
   });
 
   it('forwards budgetSats and budgetWindow when provided', async () => {
@@ -95,6 +129,8 @@ describe('clearNwcUri', () => {
       'http://localhost:3000/users/me/nwc',
       expect.objectContaining({ method: 'DELETE' })
     );
+    // DELETE /users/me/nwc is also moneyAuth — write-scope credential required.
+    expect(getNostrMoneyAuthHeaders).toHaveBeenCalled();
   });
 
   it('returns false and surfaces a toast on non-OK response', async () => {
