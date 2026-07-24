@@ -517,9 +517,44 @@ export const claimBountyCommand = (
       return;
     }
 
+    // Privacy choice: by default the creator sees the destination address when
+    // they approve (lets them eyeball where funds go). A claimant who'd rather
+    // not reveal their LN address can hide it — the backend still pays it, but
+    // never discloses it to the creator's client. Dismissing (Esc) cancels the
+    // claim so the address is never sent without an explicit privacy decision.
+    //
+    // Honest caveat for NWC bounties: those pay out from the *creator's own*
+    // wallet, so the invoice the backend fetches from the claimant's LN address
+    // may still expose it in that wallet's payment record — hiding it in our UI
+    // can't reach into the payer's wallet. Custodial payouts go through the
+    // LNbits host, so the creator truly never sees it. Spell that out so the
+    // claimant's expectation matches reality for the bounty they're claiming.
+    const isNwc = bounty.fundingMode === 'nwc';
+    const hideDetail = isNwc
+      ? "Private claim — the creator won't see your address in the extension, but their own wallet may still show it when it pays"
+      : "Private claim — the payout still reaches you, but the creator won't see your address";
+    const privacyChoice = await vscode.window.showQuickPick(
+      [
+        {
+          label: 'Share my Lightning address with the bounty creator',
+          detail: 'They see where the payout goes when they approve (default)',
+          hide: false,
+        },
+        {
+          label: '$(eye-closed) Hide my Lightning address from the creator',
+          detail: hideDetail,
+          hide: true,
+        },
+      ],
+      { title: 'Payout address privacy', ignoreFocusOut: true }
+    );
+    if (!privacyChoice) {
+      return; // dismissed → cancel the claim, nothing sent
+    }
+
     try {
       // Send claim to backend
-      const newClaim = await claimBountyWithLnAddress(bounty.id, lnurl);
+      const newClaim = await claimBountyWithLnAddress(bounty.id, lnurl, privacyChoice.hide);
       // Update local cache. The bounty is fresh-from-backend so `claims` may
       // be absent or empty — always replace with the claim we just got back.
       if (newClaim?.status === claimStatusPending) {
@@ -579,19 +614,32 @@ export const approveClaimCommand = (
       return;
     }
 
-    // Show the destination LNURL truncated so the creator can verify it without
-    // the full string overwhelming the dialog. A full match check lives on the
-    // backend (the claimId binding) — this is a human-readable sanity check.
-    const lnurl = pendingClaim.claimantLnurl;
-    const displayLnurl =
-      lnurl.length > 50 ? `${lnurl.slice(0, 24)}…${lnurl.slice(-16)}` : lnurl;
+    // Build the destination line for the confirmation dialog. When the claimant
+    // opted into privacy, the backend redacts the address (`claimantLnurl` is
+    // null, `lnurlHidden` true) — the creator approves without seeing it. The
+    // payout is still bound to this exact claim via `claimId` and routed to the
+    // pinned address server-side, so hiding it doesn't weaken front-running
+    // protection; the creator just can't eyeball the destination.
+    let destinationLine: string;
+    let privacyDetail = '';
+    if (pendingClaim.lnurlHidden || !pendingClaim.claimantLnurl) {
+      destinationLine = 'the claimant (address hidden at their request)';
+      privacyDetail =
+        '\n\nThe claimant chose to keep their Lightning address private. The payout is locked to their claim and cannot be redirected.';
+    } else {
+      // Truncate a long LNURL so the creator can verify it without the full
+      // string overwhelming the dialog. The claimId binding is the real check.
+      const lnurl = pendingClaim.claimantLnurl;
+      destinationLine =
+        lnurl.length > 50 ? `${lnurl.slice(0, 24)}…${lnurl.slice(-16)}` : lnurl;
+    }
 
     // Modal dialogs render VS Code's own Cancel button — passing an explicit
     // 'Cancel' item here used to show two of them. Dismissal resolves to
     // undefined, which the guard below already treats as "don't approve".
     const confirmed = await vscode.window.showWarningMessage(
-      `Send ${bounty.amountSats} sats to:\n${displayLnurl}`,
-      { modal: true, detail: `Bounty: "${test?.label}"` },
+      `Send ${bounty.amountSats} sats to:\n${destinationLine}`,
+      { modal: true, detail: `Bounty: "${test?.label}"${privacyDetail}` },
       'Yes, Approve Payout'
     );
 

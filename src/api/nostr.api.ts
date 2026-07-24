@@ -428,7 +428,7 @@ export async function connectNostr(
             </button>
 
             <div class="notice">
-            This connects your Nostr identity to Sattest, which allows you to create, claim, and approve bounties. If the connection is not working, end the remote session and try again.
+            Connecting Nostr to Sattest allows you to create, claim, and approve bounties.
             </div>
 
             <p id="status" class="status">Waiting for approval in your signer app...</p>

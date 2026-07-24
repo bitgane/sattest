@@ -988,17 +988,63 @@ describe('claimBountyCommand', () => {
     const mockEmitter = { fire: jest.fn() } as any;
 
     (vscode.window.showInputBox as jest.Mock).mockResolvedValueOnce('alice@primal.net');
+    // Privacy quick-pick → default "share" option.
+    (vscode.window.showQuickPick as jest.Mock).mockResolvedValueOnce({ hide: false });
     (claimBountyWithLnAddress as jest.Mock).mockResolvedValue({ status: 'pending' });
 
     claimBountyCommand(bounties, mockEmitter);
     await capturedHandler!(createMockTestItem({ id: 'test-id' }));
 
-    expect(claimBountyWithLnAddress).toHaveBeenCalledWith('bounty-uuid', 'alice@primal.net');
+    expect(claimBountyWithLnAddress).toHaveBeenCalledWith('bounty-uuid', 'alice@primal.net', false);
     expect(bounties.get('test-id')!.claims[0].status).toBe('pending');
     expect(mockEmitter.fire).toHaveBeenCalled();
     expect(vscode.window.showInformationMessage).toHaveBeenCalledWith(
       expect.stringContaining('Claim request sent')
     );
+  });
+
+  it('passes hideLnurl=true when the claimant chooses a private claim', async () => {
+    const bounties = new Map<string, BountyInfo>();
+    bounties.set('test-id', {
+      id: 'bounty-uuid',
+      amountSats: 10000,
+      invoicePaid: true,
+      claims: [{} as ClaimInfo],
+      testId: 'test-id',
+    } as BountyInfo);
+
+    const mockEmitter = { fire: jest.fn() } as any;
+
+    (vscode.window.showInputBox as jest.Mock).mockResolvedValueOnce('alice@primal.net');
+    (vscode.window.showQuickPick as jest.Mock).mockResolvedValueOnce({ hide: true });
+    (claimBountyWithLnAddress as jest.Mock).mockResolvedValue({ status: 'pending' });
+
+    claimBountyCommand(bounties, mockEmitter);
+    await capturedHandler!(createMockTestItem({ id: 'test-id' }));
+
+    expect(claimBountyWithLnAddress).toHaveBeenCalledWith('bounty-uuid', 'alice@primal.net', true);
+  });
+
+  it('cancels the claim (nothing sent) when the privacy prompt is dismissed', async () => {
+    const bounties = new Map<string, BountyInfo>();
+    bounties.set('test-id', {
+      id: 'bounty-uuid',
+      amountSats: 10000,
+      invoicePaid: true,
+      claims: [{} as ClaimInfo],
+      testId: 'test-id',
+    } as BountyInfo);
+
+    const mockEmitter = { fire: jest.fn() } as any;
+
+    (vscode.window.showInputBox as jest.Mock).mockResolvedValueOnce('alice@primal.net');
+    // Esc on the privacy quick-pick → undefined.
+    (vscode.window.showQuickPick as jest.Mock).mockResolvedValueOnce(undefined);
+
+    claimBountyCommand(bounties, mockEmitter);
+    await capturedHandler!(createMockTestItem({ id: 'test-id' }));
+
+    expect(claimBountyWithLnAddress).not.toHaveBeenCalled();
   });
 
   it('does not crash when bounty.claims is undefined (backend omitted it)', async () => {
@@ -1017,6 +1063,7 @@ describe('claimBountyCommand', () => {
     const mockEmitter = { fire: jest.fn() } as any;
 
     (vscode.window.showInputBox as jest.Mock).mockResolvedValueOnce('alice@primal.net');
+    (vscode.window.showQuickPick as jest.Mock).mockResolvedValueOnce({ hide: false });
     (claimBountyWithLnAddress as jest.Mock).mockResolvedValue({
       id: 'claim-1',
       status: 'pending',
@@ -1208,6 +1255,45 @@ describe('approveClaimCommand', () => {
     expect(vscode.window.showInformationMessage).toHaveBeenCalledWith(
       'Claim approved – payout triggered!'
     );
+  });
+
+  it('approves a private claim without ever showing the hidden address', async () => {
+    (getNostrUserPubkey as jest.Mock).mockResolvedValue('creator-pubkey');
+    // Backend redacted the destination for a private claim: no LNURL, flagged hidden.
+    (getPendingClaimApi as jest.Mock).mockResolvedValue({
+      id: MOCK_CLAIM_ID,
+      claimantLnurl: null,
+      claimedAt: new Date().toISOString(),
+      status: 'pending',
+      lnurlHidden: true,
+    });
+
+    const bounties = new Map<string, BountyInfo>();
+    bounties.set('test-id', {
+      id: 'bounty-uuid',
+      amountSats: 10000,
+      testId: 'test-id',
+      creatorId: 'creator-pubkey',
+      claims: [{ status: 'pending' as ClaimStatus }],
+    } as BountyInfo);
+
+    const mockEmitter = { fire: jest.fn() } as any;
+    (vscode.window.showWarningMessage as jest.Mock).mockResolvedValue('Yes, Approve Payout');
+    (approveClaimApi as jest.Mock).mockResolvedValue({
+      id: 'bounty-uuid',
+      claims: [{ status: 'approved' }],
+    });
+
+    approveClaimCommand(bounties, mockEmitter);
+    await capturedHandler!(createMockTestItem({ id: 'test-id' }));
+
+    // The confirmation dialog signals the address is hidden, never a raw address.
+    const [message, options] = (vscode.window.showWarningMessage as jest.Mock).mock.calls[0];
+    expect(message).toMatch(/hidden/i);
+    expect(`${message} ${options?.detail ?? ''}`).not.toContain('@');
+    // Approval still binds to the reviewed claim id and goes through.
+    expect(approveClaimApi).toHaveBeenCalledWith('bounty-uuid', MOCK_CLAIM_ID);
+    expect(bounties.get('test-id')!.claims[0].status).toBe('approved');
   });
 
   it('handles approval API error', async () => {

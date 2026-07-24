@@ -256,11 +256,15 @@ export async function updatePaidStatus(id: string): Promise<boolean> {
  * Submits a claim request to the backend for a bounty using the claimer's LNURL.
  * @param id - The bounty ID (UUID from the bounties table)
  * @param lnurl - The claimer's LNURL (withdrawal link)
+ * @param hideLnurl - When true, ask the backend to keep this payout destination
+ *   private: it's still stored and paid, but never disclosed to the bounty
+ *   creator/approver. Omitted from the wire when false to stay backward-compatible.
  * @returns The updated bounty info if successful, null on failure
  */
 export async function claimBountyWithLnAddress(
   id: string,
-  lnurl: string
+  lnurl: string,
+  hideLnurl: boolean = false
 ): Promise<ClaimInfo | null> {
   try {
     const claimResponse = await authedFetch(
@@ -270,6 +274,7 @@ export async function claimBountyWithLnAddress(
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           lnurl: lnurl.trim(),
+          ...(hideLnurl ? { hideLnurl: true } : {}),
         }),
       },
       { interactiveReauth: true, scope: 'write' }
@@ -439,7 +444,13 @@ export async function setBountyCreator(
  */
 export async function getPendingClaim(
   bountyId: string
-): Promise<{ id: string; claimantLnurl: string; claimedAt: string; status: string } | null> {
+): Promise<{
+  id: string;
+  claimantLnurl: string | null;
+  claimedAt: string;
+  status: string;
+  lnurlHidden: boolean;
+} | null> {
   try {
     const response = await authedFetch(
       `${getBackendUrl()}/bounties/${encodeURIComponent(bountyId)}/pending-claim`,
@@ -449,10 +460,19 @@ export async function getPendingClaim(
       return null;
     }
     const data = await response.json();
-    if (!data?.id || !data?.claimantLnurl) {
+    // A private claim intentionally omits `claimantLnurl` (backend redacts it),
+    // so only require the `id` here — that's what binds the approval. Fall back
+    // to a false `lnurlHidden` for older backends that don't send the flag.
+    if (!data?.id) {
       return null;
     }
-    return data as { id: string; claimantLnurl: string; claimedAt: string; status: string };
+    return {
+      id: data.id,
+      claimantLnurl: data.claimantLnurl ?? null,
+      claimedAt: data.claimedAt,
+      status: data.status,
+      lnurlHidden: data.lnurlHidden === true,
+    };
   } catch {
     return null;
   }
