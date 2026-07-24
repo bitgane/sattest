@@ -200,6 +200,80 @@ export const WRITE_AUTH_CONTENT = 'sattest-auth:write';
  */
 const RELAY_CONNECT_TIMEOUT_MS = 5000;
 
+/**
+ * How long a kind-0 profile lookup waits for relays to answer.
+ *
+ * `pool.get` resolves as soon as every queried relay sends EOSE, so without a
+ * `maxWait` the fastest empty relay decides the result: the promise settles
+ * `null` before a slower relay that actually holds the profile can reply. That
+ * was a major cause of the "Connected as <hex>" banner.
+ */
+const PROFILE_LOOKUP_MAX_WAIT_MS = 4000;
+
+/**
+ * Resolve a display handle (kind-0 `name` / `nip05` / `username`) for `pubkey`.
+ *
+ * Returns `undefined` when no profile is found or it carries no usable name.
+ * Callers MUST treat that as "unknown" and never persist a placeholder — the
+ * stored handle has no refresh path other than `refreshNostrHandleIfStale`, so
+ * a persisted fallback sticks around and shows hex in the banner forever.
+ *
+ * The `@` prefix is applied only to a genuinely resolved name, so a pubkey
+ * rendering is never dressed up as a handle.
+ */
+async function fetchProfileHandle(
+  pool: SimplePool,
+  relays: string[],
+  pubkey: string
+): Promise<string | undefined> {
+  try {
+    const event = await pool.get(
+      relays,
+      { kinds: [0], authors: [pubkey] },
+      { maxWait: PROFILE_LOOKUP_MAX_WAIT_MS }
+    );
+    if (!event) {
+      return undefined;
+    }
+    const profile = JSON.parse(event.content || '{}');
+    const raw = profile.name || profile.nip05 || profile.username;
+    if (typeof raw !== 'string' || raw.trim().length === 0) {
+      return undefined;
+    }
+    const name = raw.trim().slice(0, 100);
+    return name.startsWith('@') ? name : `@${name}`;
+  } catch {
+    // Malformed profile JSON, or the lookup itself failed — treat as unknown.
+    return undefined;
+  }
+}
+
+/** Display-only rendering of a pubkey, used when no handle could be resolved. */
+function formatPubkeyForDisplay(pubkey: string): string {
+  return `${pubkey.slice(0, 8)}…${pubkey.slice(-4)}`;
+}
+
+/**
+ * True when a stored handle is really a pubkey rendering rather than a name.
+ *
+ * Recognises the fallback shapes older builds persisted (`<first10>...`, with
+ * or without an `@`) plus the current display form, so installs already
+ * poisoned by a failed lookup can self-heal instead of showing hex forever.
+ */
+export function isPubkeyFallbackHandle(handle: string, pubkey: string): boolean {
+  const base = handle.startsWith('@') ? handle.slice(1) : handle;
+  if (base.trim().length === 0) {
+    return true;
+  }
+  if (base === `${pubkey.slice(0, 10)}...` || base === formatPubkeyForDisplay(pubkey)) {
+    return true;
+  }
+  // Defensive: any pure-hex string that prefixes the pubkey is a slice of it,
+  // not a name (real handles aren't hex prefixes of their own pubkey).
+  const trimmed = base.replace(/[.…]+$/g, '').toLowerCase();
+  return /^[0-9a-f]{4,}$/.test(trimmed) && pubkey.toLowerCase().startsWith(trimmed);
+}
+
 export async function connectNostr(
   context: vscode.ExtensionContext,
   onBountiesChangedEmitter: vscode.EventEmitter<void>,
@@ -576,27 +650,41 @@ export async function resolveNostrInfoFromBunkerSigner(
 
     const userPubkey = await bunker.getPublicKey();
 
-    // Fetch profile (kind 0) for handle
-    const event = await pool.get(relays, {
-      kinds: [0],
-      authors: [userPubkey],
-    });
+    // Fetch profile (kind 0) for the handle.
+    //
+    // The handshake above legitimately needs *live-connected* relays, but a
+    // metadata read does not: querying only `relays` (the ones that won the 5s
+    // connect race) systematically biased this lookup toward the NIP-46 signer
+    // relay — which answers fastest and is the least likely to hold a kind-0 —
+    // so the profile came back empty and the banner showed hex. Query the full
+    // configured set as well, and let `maxWait` give a slower general relay
+    // that actually has the profile a chance to answer.
+    const profileRelays = Array.from(new Set([...relays, ...getNostrRelays()]));
+    const resolvedHandle = await fetchProfileHandle(pool, profileRelays, userPubkey);
 
-    let userHandle = userPubkey.slice(0, 10) + '...'; // fallback
-
-    if (event) {
-      try {
-        const profile = JSON.parse(event.content || '{}');
-        const raw = profile.name || profile.nip05 || profile.username;
-        if (typeof raw === 'string' && raw.length > 0) {
-          userHandle = raw.slice(0, 100);
-        }
-      } catch {
-        // Malformed profile JSON – keep fallback handle
-      }
-      if (!userHandle.startsWith('@')) {
-        userHandle = `@${userHandle}`;
-      }
+    // Decide what to display *and* what (if anything) to persist. Never store
+    // a pubkey fallback: `setNostrUserHandle` is the only write site and there
+    // is no refresh path at connect time, so one miss would otherwise poison
+    // the banner permanently.
+    const previousPubkey = await getNostrUserPubkey();
+    const previousHandle = await getNostrUserHandle();
+    let userHandle: string;
+    if (resolvedHandle) {
+      userHandle = resolvedHandle;
+    } else if (
+      previousPubkey === userPubkey &&
+      previousHandle &&
+      !isPubkeyFallbackHandle(previousHandle, userPubkey)
+    ) {
+      // Same identity, lookup missed (slow/unreachable metadata relay) — keep
+      // the good handle we resolved on an earlier connect rather than
+      // regressing to hex.
+      userHandle = previousHandle;
+    } else {
+      // Unknown, or a *different* identity we couldn't name. Render the pubkey
+      // for display only — and make sure the previous identity's handle can't
+      // bleed through onto this one.
+      userHandle = formatPubkeyForDisplay(userPubkey);
     }
 
     // Sign the read-scope auth credential for backend API authentication
@@ -628,7 +716,16 @@ export async function resolveNostrInfoFromBunkerSigner(
     await setNostrAuthEvent(JSON.stringify(signedAuthEvent));
 
     await setNostrUserPubkey(userPubkey);
-    await setNostrUserHandle(userHandle);
+    // Persist only a real name. When the lookup missed we either kept the
+    // previously-resolved handle for this same identity (already stored, so
+    // nothing to write) or we're showing a pubkey rendering — storing that
+    // would make the fallback permanent, and for a *new* identity it must also
+    // clear the previous identity's handle so it can't bleed through.
+    if (resolvedHandle) {
+      await setNostrUserHandle(resolvedHandle);
+    } else if (previousPubkey !== userPubkey) {
+      await setNostrUserHandle('');
+    }
 
     // Replace the entire panel body with a minimal success view: the green
     // "Connected as @handle" banner updated to the *new* identity, and a
@@ -664,6 +761,51 @@ function hexToBytes(hex: string): Uint8Array {
     bytes[i / 2] = parseInt(hex.substr(i, 2), 16);
   }
   return bytes;
+}
+
+/**
+ * Self-heal a stored handle that is really a pubkey rendering.
+ *
+ * Builds shipped before the profile-lookup fix persisted a hex fallback
+ * whenever the kind-0 query missed, and connect is the only other write site —
+ * so an affected install keeps showing hex until the user happens to re-pair.
+ * Called fire-and-forget on activation: when the stored handle is missing or
+ * looks like a pubkey, re-resolve it against the full configured relay set and
+ * store the real name if one turns up.
+ *
+ * Never overwrites a good handle and never persists a fallback, so it's safe to
+ * run on every activation.
+ *
+ * @returns the refreshed handle, or `undefined` when nothing changed.
+ */
+export async function refreshNostrHandleIfStale(): Promise<string | undefined> {
+  const pubkey = await getNostrUserPubkey();
+  if (!pubkey) {
+    return undefined; // not connected — nothing to refresh
+  }
+  const stored = await getNostrUserHandle();
+  if (stored && !isPubkeyFallbackHandle(stored, pubkey)) {
+    return undefined; // already a real handle
+  }
+
+  const relays = getNostrRelays();
+  const pool = new SimplePool();
+  try {
+    const handle = await fetchProfileHandle(pool, relays, pubkey);
+    if (!handle) {
+      return undefined;
+    }
+    await setNostrUserHandle(handle);
+    return handle;
+  } catch {
+    return undefined;
+  } finally {
+    try {
+      pool.close(relays);
+    } catch {
+      /* already closed */
+    }
+  }
 }
 
 /**

@@ -53,7 +53,13 @@ jest.mock('../state', () => ({
   initializeSecrets: jest.fn(),
 }));
 
-import { connectNostr, resolveNostrInfoFromBunkerSigner, signMoneyAuthEvent } from './nostr.api.js';
+import {
+  connectNostr,
+  isPubkeyFallbackHandle,
+  refreshNostrHandleIfStale,
+  resolveNostrInfoFromBunkerSigner,
+  signMoneyAuthEvent,
+} from './nostr.api.js';
 import { BunkerSigner } from 'nostr-tools/nip46';
 import { SimplePool, nip44 } from 'nostr-tools';
 import { getNostrClientSecret, getNostrBunkerPointer } from '../state.js';
@@ -510,7 +516,132 @@ describe('resolveNostrInfoFromBunkerSigner', () => {
     );
 
     expect(result?.userPubkey).toBe('abcdef1234567890abcdef');
-    expect(result?.userHandle).toContain('abcdef1234');
+    // A pubkey rendering, NOT dressed up as a handle with an "@".
+    expect(result?.userHandle).toBe('abcdef12…cdef');
+    expect(result?.userHandle).not.toMatch(/^@/);
+    // Critically: the fallback must never be persisted — there's no refresh
+    // path at connect time, so storing it would show hex in the banner forever.
+    const { setNostrUserHandle } = require('../state');
+    expect(setNostrUserHandle).not.toHaveBeenCalledWith(expect.stringContaining('abcdef12'));
+  });
+
+  it('queries the profile against the full configured relay set, with a maxWait', async () => {
+    const mockBunker = {
+      getPublicKey: jest.fn().mockResolvedValue('user-pubkey-hex'),
+      signEvent: jest.fn().mockResolvedValue({ kind: 22242, sig: 'fake-sig' }),
+    };
+    (BunkerSigner.fromBunker as jest.Mock).mockReturnValue(mockBunker);
+    handshakeSucceeds();
+    const { getNostrRelays } = require('../state');
+    // Configured set is wider than the relays that won the 5s connect race.
+    (getNostrRelays as jest.Mock).mockReturnValue([
+      'wss://relay.damus.io',
+      'wss://relay.nsec.app',
+    ]);
+    mockPool.get.mockResolvedValue({ content: JSON.stringify({ name: 'alice' }) });
+
+    await resolveNostrInfoFromBunkerSigner(
+      new Uint8Array(32),
+      'nostr+connect://test',
+      ['wss://relay.nsec.app'], // only the signer relay connected in time
+      mockPool,
+      mockContext,
+      mockPanel,
+      undefined,
+      0
+    );
+
+    const [relaysArg, filterArg, optsArg] = mockPool.get.mock.calls[0];
+    // Regression: querying only the live (signer) relay is what made the
+    // lookup miss and fall back to hex. The general relay must be included.
+    expect(relaysArg).toEqual(expect.arrayContaining(['wss://relay.damus.io']));
+    expect(filterArg).toEqual({ kinds: [0], authors: ['user-pubkey-hex'] });
+    // Without maxWait the fastest empty relay's EOSE resolves the lookup null.
+    expect(optsArg?.maxWait).toBeGreaterThan(0);
+  });
+
+  it('persists a resolved handle', async () => {
+    const mockBunker = {
+      getPublicKey: jest.fn().mockResolvedValue('user-pubkey-hex'),
+      signEvent: jest.fn().mockResolvedValue({ kind: 22242, sig: 'fake-sig' }),
+    };
+    (BunkerSigner.fromBunker as jest.Mock).mockReturnValue(mockBunker);
+    handshakeSucceeds();
+    mockPool.get.mockResolvedValue({ content: JSON.stringify({ name: 'alice' }) });
+
+    await resolveNostrInfoFromBunkerSigner(
+      new Uint8Array(32),
+      'nostr+connect://test',
+      ['wss://relay.test.com'],
+      mockPool,
+      mockContext,
+      mockPanel,
+      undefined,
+      0
+    );
+
+    const { setNostrUserHandle } = require('../state');
+    expect(setNostrUserHandle).toHaveBeenCalledWith('@alice');
+  });
+
+  it('keeps the previously resolved handle when a re-connect lookup misses', async () => {
+    const { getNostrUserPubkey, getNostrUserHandle, setNostrUserHandle } = require('../state');
+    // Same identity as last time, and we already know its real name.
+    (getNostrUserPubkey as jest.Mock).mockResolvedValue('user-pubkey-hex');
+    (getNostrUserHandle as jest.Mock).mockResolvedValue('@alice');
+
+    const mockBunker = {
+      getPublicKey: jest.fn().mockResolvedValue('user-pubkey-hex'),
+      signEvent: jest.fn().mockResolvedValue({ kind: 22242, sig: 'fake-sig' }),
+    };
+    (BunkerSigner.fromBunker as jest.Mock).mockReturnValue(mockBunker);
+    handshakeSucceeds();
+    mockPool.get.mockResolvedValue(null); // relay miss
+
+    const result = await resolveNostrInfoFromBunkerSigner(
+      new Uint8Array(32),
+      'nostr+connect://test',
+      ['wss://relay.test.com'],
+      mockPool,
+      mockContext,
+      mockPanel,
+      undefined,
+      0
+    );
+
+    // Doesn't regress to hex, and doesn't rewrite storage.
+    expect(result?.userHandle).toBe('@alice');
+    expect(setNostrUserHandle).not.toHaveBeenCalled();
+  });
+
+  it("clears the stored handle when a different identity's name can't be resolved", async () => {
+    const { getNostrUserPubkey, getNostrUserHandle, setNostrUserHandle } = require('../state');
+    // Previously connected as alice; now connecting as someone else.
+    (getNostrUserPubkey as jest.Mock).mockResolvedValue('old-pubkey-hex');
+    (getNostrUserHandle as jest.Mock).mockResolvedValue('@alice');
+
+    const mockBunker = {
+      getPublicKey: jest.fn().mockResolvedValue('new-pubkey-hex'),
+      signEvent: jest.fn().mockResolvedValue({ kind: 22242, sig: 'fake-sig' }),
+    };
+    (BunkerSigner.fromBunker as jest.Mock).mockReturnValue(mockBunker);
+    handshakeSucceeds();
+    mockPool.get.mockResolvedValue(null);
+
+    const result = await resolveNostrInfoFromBunkerSigner(
+      new Uint8Array(32),
+      'nostr+connect://test',
+      ['wss://relay.test.com'],
+      mockPool,
+      mockContext,
+      mockPanel,
+      undefined,
+      0
+    );
+
+    // alice's handle must not bleed onto the new identity.
+    expect(result?.userHandle).not.toBe('@alice');
+    expect(setNostrUserHandle).toHaveBeenCalledWith('');
   });
 
   it('handles malformed profile JSON gracefully', async () => {
@@ -534,8 +665,10 @@ describe('resolveNostrInfoFromBunkerSigner', () => {
     );
 
     expect(result).toBeDefined();
-    // Falls back to truncated pubkey with @ prefix
-    expect(result?.userHandle).toMatch(/^@/);
+    // Malformed profile == no usable name: render the pubkey, and don't pass it
+    // off as a handle by prefixing "@".
+    expect(result?.userHandle).toBe('pubkey12…2345');
+    expect(result?.userHandle).not.toMatch(/^@/);
   });
 
   it('returns undefined on error', async () => {
@@ -674,5 +807,90 @@ describe('signMoneyAuthEvent', () => {
 
     await expect(signMoneyAuthEvent('n')).rejects.toThrow('Nostr authentication required');
     expect(BunkerSigner.fromBunker).not.toHaveBeenCalled();
+  });
+});
+
+describe('isPubkeyFallbackHandle', () => {
+  const PUBKEY = 'abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890';
+
+  it('recognises the legacy stored fallback (with and without @)', () => {
+    // What older builds persisted on a failed lookup.
+    expect(isPubkeyFallbackHandle(`${PUBKEY.slice(0, 10)}...`, PUBKEY)).toBe(true);
+    expect(isPubkeyFallbackHandle(`@${PUBKEY.slice(0, 10)}...`, PUBKEY)).toBe(true);
+  });
+
+  it('recognises the current display rendering and empty values', () => {
+    expect(isPubkeyFallbackHandle('abcdef12…7890', PUBKEY)).toBe(true);
+    expect(isPubkeyFallbackHandle('', PUBKEY)).toBe(true);
+    expect(isPubkeyFallbackHandle('   ', PUBKEY)).toBe(true);
+  });
+
+  it('treats a real name as a real handle', () => {
+    expect(isPubkeyFallbackHandle('@alice', PUBKEY)).toBe(false);
+    expect(isPubkeyFallbackHandle('@alice@example.com', PUBKEY)).toBe(false);
+    // A hex-looking name that is NOT a prefix of this pubkey is still a name.
+    expect(isPubkeyFallbackHandle('@deadbeef', PUBKEY)).toBe(false);
+  });
+});
+
+describe('refreshNostrHandleIfStale', () => {
+  const PUBKEY = 'abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890';
+  let pool: any;
+
+  beforeEach(() => {
+    const { SimplePool } = require('nostr-tools');
+    pool = new SimplePool();
+    pool.get.mockReset().mockResolvedValue(null);
+    const { getNostrRelays } = require('../state');
+    (getNostrRelays as jest.Mock).mockReturnValue(['wss://relay.test.com']);
+  });
+
+  it('does nothing when no identity is connected', async () => {
+    const { getNostrUserPubkey, setNostrUserHandle } = require('../state');
+    (getNostrUserPubkey as jest.Mock).mockResolvedValue(undefined);
+
+    await expect(refreshNostrHandleIfStale()).resolves.toBeUndefined();
+    expect(setNostrUserHandle).not.toHaveBeenCalled();
+    expect(pool.get).not.toHaveBeenCalled();
+  });
+
+  it('leaves an already-good handle alone (no relay round-trip)', async () => {
+    const { getNostrUserPubkey, getNostrUserHandle, setNostrUserHandle } = require('../state');
+    (getNostrUserPubkey as jest.Mock).mockResolvedValue(PUBKEY);
+    (getNostrUserHandle as jest.Mock).mockResolvedValue('@alice');
+
+    await expect(refreshNostrHandleIfStale()).resolves.toBeUndefined();
+    expect(pool.get).not.toHaveBeenCalled();
+    expect(setNostrUserHandle).not.toHaveBeenCalled();
+  });
+
+  it('re-resolves and stores the real name over a poisoned hex fallback', async () => {
+    const { getNostrUserPubkey, getNostrUserHandle, setNostrUserHandle } = require('../state');
+    (getNostrUserPubkey as jest.Mock).mockResolvedValue(PUBKEY);
+    // Stored by an older build after a failed lookup.
+    (getNostrUserHandle as jest.Mock).mockResolvedValue(`${PUBKEY.slice(0, 10)}...`);
+    pool.get.mockResolvedValue({ content: JSON.stringify({ name: 'alice' }) });
+
+    await expect(refreshNostrHandleIfStale()).resolves.toBe('@alice');
+    expect(setNostrUserHandle).toHaveBeenCalledWith('@alice');
+  });
+
+  it('does not persist anything when the refresh lookup also misses', async () => {
+    const { getNostrUserPubkey, getNostrUserHandle, setNostrUserHandle } = require('../state');
+    (getNostrUserPubkey as jest.Mock).mockResolvedValue(PUBKEY);
+    (getNostrUserHandle as jest.Mock).mockResolvedValue(`${PUBKEY.slice(0, 10)}...`);
+    pool.get.mockResolvedValue(null);
+
+    await expect(refreshNostrHandleIfStale()).resolves.toBeUndefined();
+    expect(setNostrUserHandle).not.toHaveBeenCalled();
+  });
+
+  it('never throws when the relay read fails (activation must not break)', async () => {
+    const { getNostrUserPubkey, getNostrUserHandle } = require('../state');
+    (getNostrUserPubkey as jest.Mock).mockResolvedValue(PUBKEY);
+    (getNostrUserHandle as jest.Mock).mockResolvedValue(undefined);
+    pool.get.mockRejectedValue(new Error('relay down'));
+
+    await expect(refreshNostrHandleIfStale()).resolves.toBeUndefined();
   });
 });

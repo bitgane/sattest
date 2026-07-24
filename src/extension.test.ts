@@ -12,6 +12,8 @@ jest.mock('./api/bounty.api', () => ({
 
 jest.mock('./api/nostr.api', () => ({
   connectNostr: jest.fn().mockResolvedValue(undefined),
+  // Fire-and-forget self-heal kicked off during activate().
+  refreshNostrHandleIfStale: jest.fn().mockResolvedValue(undefined),
 }));
 
 jest.mock('./api/nwc.api', () => ({

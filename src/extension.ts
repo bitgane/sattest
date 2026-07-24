@@ -12,7 +12,7 @@ import { fetchBounties } from './api/bounty.api.js';
 import { findTestItemById, getRepoSlug, getLocalTestIds } from './test/test-item.util.js';
 import { activateTestController, myTestController } from './test/test-controller.js';
 import { CustomTestItem } from './test/test-item-wrapper.js';
-import { connectNostr } from './api/nostr.api.js';
+import { connectNostr, refreshNostrHandleIfStale } from './api/nostr.api.js';
 import { clearNwcUri, confirmBackendForNwc, getNwcStatus, setNwcUri } from './api/nwc.api.js';
 import { setAuthRefresher } from './api/authed-fetch.js';
 import { getNostrUserPubkey, initializeSecrets } from './state.js';
@@ -37,6 +37,14 @@ export async function activate(context: vscode.ExtensionContext) {
 
   // Activate Test Controller & register tests
   activateTestController(context);
+
+  // Self-heal a handle that an older build persisted as a hex pubkey fallback,
+  // so the "Connected as @handle" banner shows the real name next time it
+  // renders. Fire-and-forget: it's a best-effort relay read that must never
+  // delay or fail activation.
+  void refreshNostrHandleIfStale().catch((err) =>
+    console.debug('[Extension] Handle refresh skipped:', err)
+  );
 
   // Resolve repo slug once at startup for all bounty queries
   const repoSlug = getRepoSlug();
