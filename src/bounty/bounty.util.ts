@@ -621,11 +621,8 @@ export const approveClaimCommand = (
     // pinned address server-side, so hiding it doesn't weaken front-running
     // protection; the creator just can't eyeball the destination.
     let destinationLine: string;
-    let privacyDetail = '';
     if (pendingClaim.lnurlHidden || !pendingClaim.claimantLnurl) {
-      destinationLine = 'the claimant (address hidden at their request)';
-      privacyDetail =
-        '\n\nThe claimant chose to keep their Lightning address private. The payout is locked to their claim and cannot be redirected.';
+      destinationLine = 'the claimant';
     } else {
       // Truncate a long LNURL so the creator can verify it without the full
       // string overwhelming the dialog. The claimId binding is the real check.
@@ -639,7 +636,7 @@ export const approveClaimCommand = (
     // undefined, which the guard below already treats as "don't approve".
     const confirmed = await vscode.window.showWarningMessage(
       `Send ${bounty.amountSats} sats to:\n${destinationLine}`,
-      { modal: true, detail: `Bounty: "${test?.label}"${privacyDetail}` },
+      { modal: true, detail: `Bounty: "${test?.label}"` },
       'Yes, Approve Payout'
     );
 
