@@ -161,6 +161,19 @@ describe('connectNostr', () => {
     expect(setNostrClientSecret).toHaveBeenCalled();
   });
 
+  it('requests signing permissions up front in the connect URI', async () => {
+    const { createNostrConnectURI } = require('nostr-tools/nip46');
+    handshakeFails();
+
+    await connectNostr(mockContext, mockEmitter);
+
+    // Without pre-granted perms the signer only allows what the user taps
+    // through at pairing, so a later background sign (every money call) can
+    // stall on an approval prompt nobody sees.
+    const params = (createNostrConnectURI as jest.Mock).mock.calls.at(-1)![0];
+    expect(params.perms).toEqual(expect.arrayContaining(['sign_event:22242']));
+  });
+
   it('reuses stored client secret', async () => {
     (getNostrClientSecret as jest.Mock).mockResolvedValue(
       'abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890'
@@ -758,6 +771,27 @@ describe('signMoneyAuthEvent', () => {
       .mockResolvedValue(JSON.stringify(BUNKER_POINTER));
     (BunkerSigner.fromBunker as jest.Mock).mockReset();
     sharedPool.close.mockReset();
+  });
+
+  it('times out (instead of hanging) when the signer never answers', async () => {
+    jest.useFakeTimers();
+    try {
+      // A signer that never replies — the exact "Approve did nothing, no
+      // error, no payout" case: signEvent had no timeout of its own.
+      (BunkerSigner.fromBunker as jest.Mock).mockReturnValue({
+        signEvent: jest.fn().mockReturnValue(new Promise(() => {})),
+      });
+
+      const pending = signMoneyAuthEvent('server-nonce-abc');
+      const assertion = expect(pending).rejects.toThrow(/signer didn't respond/);
+      await jest.advanceTimersByTimeAsync(61000);
+      await assertion;
+
+      // The pool is still torn down on the timeout path.
+      expect(sharedPool.close).toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   it('signs a write-scope event carrying the nonce, then closes the pool', async () => {

@@ -12,6 +12,7 @@ import { BunkerSigner, createNostrConnectURI } from 'nostr-tools/nip46';
 import { bytesToHex } from 'nostr-tools/utils';
 import * as QRCode from 'qrcode';
 import { getBackendUrl } from './config.js';
+import { SIGNER_REQUEST_TIMEOUT_MS, SignerTimeoutError } from './signer-errors.js';
 
 /** NIP-46 messages travel as kind 24133 (ephemeral — relays don't store them). */
 const NOSTR_CONNECT_KIND = 24133;
@@ -201,6 +202,37 @@ export const WRITE_AUTH_CONTENT = 'sattest-auth:write';
 const RELAY_CONNECT_TIMEOUT_MS = 5000;
 
 /**
+ * Permissions requested up front in the `nostrconnect://` URI.
+ *
+ * Without these, the signer only grants what the user happens to tap through
+ * during pairing, so a *later* background request (the write-scope credential
+ * every money-moving call mints) can sit waiting on an approval the user never
+ * sees. Asking for kind-22242 signing at connect time means the signer is
+ * primed to answer those without another prompt.
+ */
+const REQUESTED_SIGNER_PERMS = ['get_public_key', 'sign_event:22242'];
+
+/**
+ * Bound a NIP-46 round-trip so an unresponsive signer fails loudly instead of
+ * hanging the caller forever.
+ */
+async function withSignerTimeout<T>(work: Promise<T>, operation: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new SignerTimeoutError(operation)), SIGNER_REQUEST_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+/**
  * How long a kind-0 profile lookup waits for relays to answer.
  *
  * `pool.get` resolves as soon as every queried relay sends EOSE, so without a
@@ -370,6 +402,9 @@ export async function connectNostr(
     clientPubkey,
     relays: liveRelays,
     secret: bytesToHex(generateSecretKey()),
+    // Ask for signing rights at pairing time so later money-moving calls don't
+    // stall on an approval prompt the user never sees. See REQUESTED_SIGNER_PERMS.
+    perms: REQUESTED_SIGNER_PERMS,
     name: 'Sattest',
   });
 
@@ -648,7 +683,7 @@ export async function resolveNostrInfoFromBunkerSigner(
     // user to scan the connect QR again every time.
     await setNostrBunkerPointer(JSON.stringify(bunkerPointer));
 
-    const userPubkey = await bunker.getPublicKey();
+    const userPubkey = await withSignerTimeout(bunker.getPublicKey(), 'identity');
 
     // Fetch profile (kind 0) for the handle.
     //
@@ -704,15 +739,18 @@ export async function resolveNostrInfoFromBunkerSigner(
     // harvested event can't be replayed against a different server.
     const backendUrl = getBackendUrl();
     updateStatus('Signing auth credentials...', '#007acc');
-    const signedAuthEvent = await bunker.signEvent({
-      kind: 22242,
-      created_at: Math.floor(Date.now() / 1000),
-      tags: [
-        ['challenge', 'sattest-auth'],
-        ['relay', backendUrl],
-      ],
-      content: 'sattest-auth',
-    });
+    const signedAuthEvent = await withSignerTimeout(
+      bunker.signEvent({
+        kind: 22242,
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [
+          ['challenge', 'sattest-auth'],
+          ['relay', backendUrl],
+        ],
+        content: 'sattest-auth',
+      }),
+      'login signature'
+    );
     await setNostrAuthEvent(JSON.stringify(signedAuthEvent));
 
     await setNostrUserPubkey(userPubkey);
@@ -838,16 +876,22 @@ export async function signMoneyAuthEvent(nonce: string): Promise<VerifiedEvent> 
   try {
     const bunker = BunkerSigner.fromBunker(clientSecretBytes, bunkerPointer, { pool });
     const backendUrl = getBackendUrl();
-    return await bunker.signEvent({
-      kind: 22242,
-      created_at: Math.floor(Date.now() / 1000),
-      tags: [
-        ['challenge', WRITE_AUTH_CONTENT],
-        ['nonce', nonce],
-        ['relay', backendUrl],
-      ],
-      content: WRITE_AUTH_CONTENT,
-    });
+    // Bounded: an unanswered sign request here used to hang the whole call —
+    // the money endpoint never got its credential, so no POST was ever made and
+    // the user saw nothing at all (no payout, no error).
+    return await withSignerTimeout(
+      bunker.signEvent({
+        kind: 22242,
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [
+          ['challenge', WRITE_AUTH_CONTENT],
+          ['nonce', nonce],
+          ['relay', backendUrl],
+        ],
+        content: WRITE_AUTH_CONTENT,
+      }),
+      'payment authorization'
+    );
   } finally {
     pool.close(bunkerPointer.relays);
   }

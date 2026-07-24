@@ -1287,9 +1287,10 @@ describe('approveClaimCommand', () => {
     approveClaimCommand(bounties, mockEmitter);
     await capturedHandler!(createMockTestItem({ id: 'test-id' }));
 
-    // The confirmation dialog signals the address is hidden, never a raw address.
+    // The confirmation dialog names the payee generically and must never leak
+    // the raw address anywhere in the message or its detail line.
     const [message, options] = (vscode.window.showWarningMessage as jest.Mock).mock.calls[0];
-    expect(message).toMatch(/hidden/i);
+    expect(message).toContain('the claimant');
     expect(`${message} ${options?.detail ?? ''}`).not.toContain('@');
     // Approval still binds to the reviewed claim id and goes through.
     expect(approveClaimApi).toHaveBeenCalledWith('bounty-uuid', MOCK_CLAIM_ID);

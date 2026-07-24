@@ -66,6 +66,39 @@ describe('authedFetch', () => {
     expect(fetchSpy).toHaveBeenCalledTimes(1); // no retry
   });
 
+  it('propagates a signer timeout without popping the re-pair QR', async () => {
+    // A stalled signer used to hang the whole call silently; now it throws.
+    // Re-pairing can't fix a signer that isn't answering, so the refresher
+    // must NOT run — the caller needs to see the real reason.
+    const { SignerTimeoutError } = require('./signer-errors.js');
+    mockHeaders.mockRejectedValue(new SignerTimeoutError('payment authorization'));
+    const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue(res(200));
+    const refresher = jest.fn().mockResolvedValue(true);
+    setAuthRefresher(refresher);
+
+    await expect(
+      authedFetch('http://x/y', { method: 'POST' }, { interactiveReauth: true })
+    ).rejects.toThrow(/signer didn't respond/);
+    expect(refresher).not.toHaveBeenCalled();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('still reconnects when the credential is simply missing (not a timeout)', async () => {
+    // Contrast with the timeout case: a missing/expired credential IS
+    // recoverable by re-pairing, so that path must keep working.
+    mockHeaders
+      .mockRejectedValueOnce(new Error('Nostr authentication required (write scope).'))
+      .mockImplementation(async () => ({ Authorization: 'Nostr test' }));
+    const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue(res(200));
+    const refresher = jest.fn().mockResolvedValue(true);
+    setAuthRefresher(refresher);
+
+    const r = await authedFetch('http://x/y', {}, { interactiveReauth: true });
+    expect(r.status).toBe(200);
+    expect(refresher).toHaveBeenCalledTimes(1);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
   it('does NOT retry when no refresher is registered', async () => {
     const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue(res(401));
     const r = await authedFetch('http://x/y', {}, { interactiveReauth: true });

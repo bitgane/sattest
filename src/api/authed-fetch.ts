@@ -1,4 +1,5 @@
 import { getNostrAuthHeaders, getNostrMoneyAuthHeaders } from './nostr-auth.js';
+import { SignerTimeoutError } from './signer-errors.js';
 
 /**
  * Shared `fetch` wrapper for backend calls that carry a Nostr auth header.
@@ -73,6 +74,12 @@ export async function authedFetch(
     }
     return response;
   } catch (error) {
+    // A stalled signer is NOT an expired session: re-pairing can't fix a
+    // signer that isn't answering, and popping the QR would bury the real
+    // cause. Propagate so the caller surfaces "your signer didn't respond".
+    if (error instanceof SignerTimeoutError) {
+      throw error;
+    }
     // getNostrAuthHeaders / getNostrMoneyAuthHeaders throw when there is no
     // stored auth event at all. Treat that like an expired session when the
     // caller allows reconnecting.
