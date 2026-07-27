@@ -64,9 +64,10 @@ async function fetchAuthNonce(): Promise<string> {
  * first use.
  */
 export async function getNostrMoneyAuthHeaders(
-  extra?: Record<string, string>
+  extra?: Record<string, string>,
+  operation?: string
 ): Promise<Record<string, string>> {
   const nonce = await fetchAuthNonce();
-  const event = await signMoneyAuthEvent(nonce);
+  const event = await signMoneyAuthEvent(nonce, operation);
   return encodeAuthHeader(event, extra);
 }

@@ -1,5 +1,9 @@
 import { getNostrAuthHeaders, getNostrMoneyAuthHeaders } from './nostr-auth.js';
-import { SignerTimeoutError } from './signer-errors.js';
+import {
+  SignerCancelledError,
+  SignerTimeoutError,
+  SignerUnresponsiveError,
+} from './signer-errors.js';
 
 /**
  * Shared `fetch` wrapper for backend calls that carry a Nostr auth header.
@@ -52,18 +56,25 @@ async function reauth(): Promise<boolean> {
  *   calls so they never pop a webview unexpectedly.
  * @param opts.scope 'write' uses the write-scoped credential required by
  *   `moneyAuth` endpoints. Defaults to 'read' (standard credential).
+ * @param opts.operation Human label for the calling flow ("payout approval",
+ *   "wallet connection", …), surfaced by the signer notice/timeout so the
+ *   message matches what the user actually did. Write scope only.
  */
 export async function authedFetch(
   url: string | URL,
   init: RequestInit = {},
-  opts: { interactiveReauth?: boolean; scope?: 'read' | 'write' } = {}
+  opts: { interactiveReauth?: boolean; scope?: 'read' | 'write'; operation?: string } = {}
 ): Promise<Response> {
-  const getHeaders = opts.scope === 'write' ? getNostrMoneyAuthHeaders : getNostrAuthHeaders;
-
   const run = async (): Promise<Response> => {
-    const headers = await getHeaders(
-      (init.headers as Record<string, string> | undefined) ?? undefined
-    );
+    const headers =
+      opts.scope === 'write'
+        ? await getNostrMoneyAuthHeaders(
+            (init.headers as Record<string, string> | undefined) ?? undefined,
+            opts.operation
+          )
+        : await getNostrAuthHeaders(
+            (init.headers as Record<string, string> | undefined) ?? undefined
+          );
     return fetch(url, { ...init, headers });
   };
 
@@ -74,12 +85,31 @@ export async function authedFetch(
     }
     return response;
   } catch (error) {
-    // A stalled signer is NOT an expired session: re-pairing can't fix a
-    // signer that isn't answering, and popping the QR would bury the real
-    // cause. Propagate so the caller surfaces "your signer didn't respond".
-    if (error instanceof SignerTimeoutError) {
+    // The user chose to cancel the signer wait — a clean, intentional abort.
+    // Never reauth, never retry; the caller swallows this silently.
+    if (error instanceof SignerCancelledError) {
       throw error;
     }
+
+    // A signer timeout is usually a *stale* session: the pointer we're signing
+    // against was ended in the signer app, so it will never answer. Re-pairing
+    // mints a fresh pointer + auth event, which is the actual fix — so offer
+    // the QR and retry once. If the retry ALSO times out, re-pairing didn't
+    // help (signer likely asking per-signature); stop looping and diagnose.
+    if (error instanceof SignerTimeoutError) {
+      if (opts.interactiveReauth && (await reauth())) {
+        try {
+          return await run();
+        } catch (retryError) {
+          if (retryError instanceof SignerTimeoutError) {
+            throw new SignerUnresponsiveError(opts.operation ?? 'request');
+          }
+          throw retryError;
+        }
+      }
+      throw error;
+    }
+
     // getNostrAuthHeaders / getNostrMoneyAuthHeaders throw when there is no
     // stored auth event at all. Treat that like an expired session when the
     // caller allows reconnecting.

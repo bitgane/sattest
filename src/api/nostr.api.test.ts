@@ -774,7 +774,12 @@ describe('signMoneyAuthEvent', () => {
     // Default: run the progress task immediately (matches the global mock).
     (vscode.window.withProgress as jest.Mock)
       .mockReset()
-      .mockImplementation((_opts: any, task: any) => task({ report: jest.fn() }));
+      .mockImplementation((_opts: any, task: any) =>
+        task(
+          { report: jest.fn() },
+          { isCancellationRequested: false, onCancellationRequested: jest.fn() }
+        )
+      );
   });
 
   it('shows no "waiting on signer" notice when the signer answers promptly', async () => {
@@ -794,24 +799,32 @@ describe('signMoneyAuthEvent', () => {
       // Capture the progress task so we can observe when the notice dismisses.
       let taskPromise: Promise<unknown> | undefined;
       (vscode.window.withProgress as jest.Mock).mockImplementation((_opts: any, task: any) => {
-        taskPromise = Promise.resolve(task({ report: jest.fn() }));
+        taskPromise = Promise.resolve(
+          task(
+            { report: jest.fn() },
+            { isCancellationRequested: false, onCancellationRequested: jest.fn() }
+          )
+        );
         return taskPromise;
       });
 
-      // Signer answers only after the 6s notice threshold, before the 60s timeout.
+      // Signer answers only after the 5s notice threshold, before the 15s timeout.
       let resolveSign!: (v: unknown) => void;
       (BunkerSigner.fromBunker as jest.Mock).mockReturnValue({
         signEvent: jest.fn().mockReturnValue(new Promise((r) => { resolveSign = r; })),
       });
 
-      const pending = signMoneyAuthEvent('server-nonce-abc');
+      const pending = signMoneyAuthEvent('server-nonce-abc', 'payout approval');
 
       // Cross the notice threshold — the progress notice appears.
-      await jest.advanceTimersByTimeAsync(6500);
+      await jest.advanceTimersByTimeAsync(5500);
       expect(vscode.window.withProgress).toHaveBeenCalledTimes(1);
       const [opts] = (vscode.window.withProgress as jest.Mock).mock.calls[0];
       expect(opts.location).toBe(vscode.ProgressLocation.Notification);
       expect(opts.title).toMatch(/Waiting for your Nostr signer/i);
+      // Notice carries the per-operation label and offers a Cancel button.
+      expect(opts.title).toContain('payout approval');
+      expect(opts.cancellable).toBe(true);
 
       // The notice stays up (task promise pending) until the request settles…
       let noticeCleared = false;
@@ -841,7 +854,8 @@ describe('signMoneyAuthEvent', () => {
 
       const pending = signMoneyAuthEvent('server-nonce-abc');
       const assertion = expect(pending).rejects.toThrow(/signer didn't respond/);
-      await jest.advanceTimersByTimeAsync(61000);
+      // Write ops now use the 15s budget, not the old 60s one.
+      await jest.advanceTimersByTimeAsync(16000);
       await assertion;
 
       // The pool is still torn down on the timeout path.

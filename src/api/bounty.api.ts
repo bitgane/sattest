@@ -4,6 +4,7 @@ import { normalizedTestId, workspaceRoot } from '../test/test-item.util.js';
 import { authedFetch } from './authed-fetch.js';
 import { getBackendUrl } from './config.js';
 import { createLnbitsInvoice } from './lnbits.api.js';
+import { SignerCancelledError } from './signer-errors.js';
 
 export interface FetchBountiesOptions {
   testId?: string;
@@ -172,7 +173,7 @@ export async function createBounty(
         // backward-compatible with older backends that don't know the field.
         ...(fundingMode !== 'custodial' ? { fundingMode } : {}),
       }),
-    }, { interactiveReauth: true, scope: 'write' });
+    }, { interactiveReauth: true, scope: 'write', operation: 'bounty creation' });
     if (!response.ok) {
       const errorData = await response.json();
       throw new Error(errorData.message || `Backend error: ${response.status}`);
@@ -187,6 +188,10 @@ export async function createBounty(
     }
     return newBounty;
   } catch (error) {
+    // User cancelled the signer wait — quiet, intentional abort, no error toast.
+    if (error instanceof SignerCancelledError) {
+      return;
+    }
     console.error('[fetchBounties] Error creating bounty:', error);
     vscode.window.showErrorMessage('Failed to create bounty in backend');
     return;
@@ -234,7 +239,7 @@ export async function updatePaidStatus(id: string): Promise<boolean> {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
       },
-      { interactiveReauth: true, scope: 'write' }
+      { interactiveReauth: true, scope: 'write', operation: 'payment sync' }
     );
 
     if (!response.ok) {
@@ -244,6 +249,9 @@ export async function updatePaidStatus(id: string): Promise<boolean> {
 
     return true;
   } catch (error) {
+    if (error instanceof SignerCancelledError) {
+      return false;
+    }
     console.error('[updatePaidStatus] Error updating paid status:', error);
     vscode.window.showErrorMessage(
       `Failed to sync payment status: ${error instanceof Error ? error.message : 'Unknown error'}`
@@ -277,7 +285,7 @@ export async function claimBountyWithLnAddress(
           ...(hideLnurl ? { hideLnurl: true } : {}),
         }),
       },
-      { interactiveReauth: true, scope: 'write' }
+      { interactiveReauth: true, scope: 'write', operation: 'claim' }
     );
 
     if (!claimResponse.ok) {
@@ -289,6 +297,9 @@ export async function claimBountyWithLnAddress(
 
     return updatedClaim;
   } catch (error) {
+    if (error instanceof SignerCancelledError) {
+      return null;
+    }
     console.error('[claimBounty] Error claiming bounty:', error);
     vscode.window.showErrorMessage(
       `Failed to claim bounty: ${error instanceof Error ? error.message : 'Unknown error'}`
@@ -357,7 +368,7 @@ export async function deactivateBounty(
     const response = await authedFetch(
       `${getBackendUrl()}/bounties/${encodeURIComponent(bountyId)}/deactivate`,
       init,
-      { interactiveReauth: true, scope: 'write' }
+      { interactiveReauth: true, scope: 'write', operation: 'bounty removal' }
     );
 
     if (!response.ok) {
@@ -388,6 +399,9 @@ export async function deactivateBounty(
       refund: data.refund,
     };
   } catch (error) {
+    if (error instanceof SignerCancelledError) {
+      return { success: false };
+    }
     console.error('[deactivateBounty] Error:', error);
     vscode.window.showErrorMessage(
       `Failed to deactivate bounty: ${error instanceof Error ? error.message : 'Unknown error'}`
@@ -416,7 +430,7 @@ export async function setBountyCreator(
           creatorId: creatorPubkey.trim(),
         }),
       },
-      { interactiveReauth: true, scope: 'write' }
+      { interactiveReauth: true, scope: 'write', operation: 'bounty setup' }
     );
 
     if (!response.ok) {
@@ -428,6 +442,9 @@ export async function setBountyCreator(
 
     return updatedBounty;
   } catch (error) {
+    if (error instanceof SignerCancelledError) {
+      return null;
+    }
     console.error('[setBountyCreator] Error:', error);
     vscode.window.showErrorMessage(
       `Failed to set creator: ${error instanceof Error ? error.message : 'Unknown error'}`
@@ -499,7 +516,7 @@ export async function approveClaim(
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ claimId }),
       },
-      { interactiveReauth: true, scope: 'write' }
+      { interactiveReauth: true, scope: 'write', operation: 'payout approval' }
     );
 
     if (!response.ok) {
@@ -525,6 +542,9 @@ export async function approveClaim(
     const updatedBounty = await response.json();
     return updatedBounty;
   } catch (error) {
+    if (error instanceof SignerCancelledError) {
+      return null;
+    }
     console.error('[approveClaim] Error approving claim:', error);
     vscode.window.showErrorMessage(
       `Failed to approve claim: ${error instanceof Error ? error.message : 'Unknown error'}`

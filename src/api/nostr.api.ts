@@ -12,7 +12,12 @@ import { BunkerSigner, createNostrConnectURI } from 'nostr-tools/nip46';
 import { bytesToHex } from 'nostr-tools/utils';
 import * as QRCode from 'qrcode';
 import { getBackendUrl } from './config.js';
-import { SIGNER_REQUEST_TIMEOUT_MS, SignerTimeoutError } from './signer-errors.js';
+import {
+  SIGNER_CONNECT_TIMEOUT_MS,
+  SIGNER_WRITE_TIMEOUT_MS,
+  SignerCancelledError,
+  SignerTimeoutError,
+} from './signer-errors.js';
 
 /** NIP-46 messages travel as kind 24133 (ephemeral — relays don't store them). */
 const NOSTR_CONNECT_KIND = 24133;
@@ -219,24 +224,36 @@ const REQUESTED_SIGNER_PERMS = ['get_public_key', 'sign_event:22242'];
  * starts clicking other things. Fast auto-approvals settle well before this,
  * so the happy path never shows the notice.
  */
-const SIGNER_SLOW_NOTICE_MS = 6000;
+const SIGNER_SLOW_NOTICE_MS = 5000;
 
-/** Human-facing label for the "waiting on your signer" progress notice. */
+/** Human-facing title for the "waiting on your signer" progress notice. */
 function slowSignerTitle(operation: string): string {
-  return `Waiting for your Nostr signer to approve the ${operation}…`;
+  return `Waiting for your Nostr signer — ${operation}…`;
 }
 
 /**
  * Bound a NIP-46 round-trip so an unresponsive signer fails loudly instead of
  * hanging the caller forever — and, if it runs long but hasn't timed out yet,
- * surface a self-dismissing progress notice so the user knows the ball is in
- * their court (open nsec.app / Amber and approve) instead of staring at nothing.
+ * surface a self-dismissing, **cancellable** progress notice so the user knows
+ * the ball is in their court (open nsec.app / Amber and approve) instead of
+ * staring at nothing.
  *
- * The notice only appears after `SIGNER_SLOW_NOTICE_MS`, and is torn down the
- * instant the request settles — success, error, or hard timeout — so a fast
+ * The notice appears only after `SIGNER_SLOW_NOTICE_MS`, and is torn down the
+ * instant the request settles — success, error, timeout, or cancel — so a fast
  * approval shows nothing and a slow one never leaves a stale toast behind.
+ *
+ * @param timeoutMs   Hard deadline; short for money/write ops, long for the
+ *                    connect flow (which fires right after the user paired).
+ * @param cancellable Whether the notice offers a Cancel button. Off during the
+ *                    connect flow, where cancelling means aborting a pairing
+ *                    that's mid-handshake.
  */
-async function withSignerTimeout<T>(work: Promise<T>, operation: string): Promise<T> {
+async function withSignerTimeout<T>(
+  work: Promise<T>,
+  operation: string,
+  timeoutMs: number,
+  { cancellable = true }: { cancellable?: boolean } = {}
+): Promise<T> {
   // Resolves (never rejects) once we're done, whichever way it went. Drives the
   // dismissal of the progress notice.
   let finishNotice!: () => void;
@@ -244,6 +261,10 @@ async function withSignerTimeout<T>(work: Promise<T>, operation: string): Promis
     finishNotice = resolve;
   });
   let settled = false;
+
+  // Captured so the Cancel button (which only exists once the notice is shown)
+  // can reject the outstanding race below.
+  let rejectRace: ((reason: Error) => void) | undefined;
 
   const noticeTimer = setTimeout(() => {
     if (settled) {
@@ -255,12 +276,16 @@ async function withSignerTimeout<T>(work: Promise<T>, operation: string): Promis
       {
         location: vscode.ProgressLocation.Notification,
         title: slowSignerTitle(operation),
-        cancellable: false,
+        cancellable,
       },
-      async (progress) => {
+      async (progress, token) => {
         progress.report({
           message: 'Open your signer (nsec.app tab / Amber) and approve the request.',
         });
+        if (token.isCancellationRequested) {
+          rejectRace?.(new SignerCancelledError(operation));
+        }
+        token.onCancellationRequested(() => rejectRace?.(new SignerCancelledError(operation)));
         await noticeDone;
       }
     );
@@ -268,12 +293,15 @@ async function withSignerTimeout<T>(work: Promise<T>, operation: string): Promis
 
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    return await Promise.race([
-      work,
-      new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => reject(new SignerTimeoutError(operation)), SIGNER_REQUEST_TIMEOUT_MS);
-      }),
-    ]);
+    // A hand-rolled race (rather than Promise.race) so the Cancel handler above
+    // can reject the same promise the caller is awaiting. The underlying `work`
+    // keeps running — a NIP-46 request can't truly be cancelled — but the caller
+    // is freed and the pool is torn down in its own finally, same as a timeout.
+    return await new Promise<T>((resolve, reject) => {
+      rejectRace = reject;
+      work.then(resolve, reject);
+      timer = setTimeout(() => reject(new SignerTimeoutError(operation, timeoutMs)), timeoutMs);
+    });
   } finally {
     settled = true;
     clearTimeout(noticeTimer);
@@ -735,7 +763,12 @@ export async function resolveNostrInfoFromBunkerSigner(
     // user to scan the connect QR again every time.
     await setNostrBunkerPointer(JSON.stringify(bunkerPointer));
 
-    const userPubkey = await withSignerTimeout(bunker.getPublicKey(), 'identity');
+    const userPubkey = await withSignerTimeout(
+      bunker.getPublicKey(),
+      'reading your identity',
+      SIGNER_CONNECT_TIMEOUT_MS,
+      { cancellable: false }
+    );
 
     // Fetch profile (kind 0) for the handle.
     //
@@ -801,7 +834,9 @@ export async function resolveNostrInfoFromBunkerSigner(
         ],
         content: 'sattest-auth',
       }),
-      'login signature'
+      'signing you in',
+      SIGNER_CONNECT_TIMEOUT_MS,
+      { cancellable: false }
     );
     await setNostrAuthEvent(JSON.stringify(signedAuthEvent));
 
@@ -912,8 +947,15 @@ export async function refreshNostrHandleIfStale(): Promise<string | undefined> {
  * Throws if no identity is connected yet — callers (see `nostr-auth.ts`)
  * treat that the same as an expired session and can trigger the same
  * interactive-reconnect flow used elsewhere.
+ *
+ * @param operation Human label for the calling flow ("payout approval",
+ *   "wallet connection", …), surfaced in the slow-signer notice and the
+ *   timeout error so the message matches what the user actually did.
  */
-export async function signMoneyAuthEvent(nonce: string): Promise<VerifiedEvent> {
+export async function signMoneyAuthEvent(
+  nonce: string,
+  operation: string = 'signing request'
+): Promise<VerifiedEvent> {
   const clientSecretHex = await getNostrClientSecret();
   const bunkerPointerJson = await getNostrBunkerPointer();
   if (!clientSecretHex || !bunkerPointerJson) {
@@ -942,7 +984,8 @@ export async function signMoneyAuthEvent(nonce: string): Promise<VerifiedEvent> 
         ],
         content: WRITE_AUTH_CONTENT,
       }),
-      'payment authorization'
+      operation,
+      SIGNER_WRITE_TIMEOUT_MS
     );
   } finally {
     pool.close(bunkerPointer.relays);

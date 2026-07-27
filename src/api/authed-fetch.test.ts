@@ -66,19 +66,62 @@ describe('authedFetch', () => {
     expect(fetchSpy).toHaveBeenCalledTimes(1); // no retry
   });
 
-  it('propagates a signer timeout without popping the re-pair QR', async () => {
-    // A stalled signer used to hang the whole call silently; now it throws.
-    // Re-pairing can't fix a signer that isn't answering, so the refresher
-    // must NOT run — the caller needs to see the real reason.
+  it('pops the re-pair QR and retries once on a signer timeout', async () => {
+    // A timeout usually means a stale session (ended in the signer app), which
+    // re-pairing fixes by minting a fresh pointer — so offer the QR and retry.
     const { SignerTimeoutError } = require('./signer-errors.js');
-    mockHeaders.mockRejectedValue(new SignerTimeoutError('payment authorization'));
+    mockHeaders
+      .mockRejectedValueOnce(new SignerTimeoutError('payout approval'))
+      .mockImplementation(async () => ({ Authorization: 'Nostr test' }));
+    const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue(res(200));
+    const refresher = jest.fn().mockResolvedValue(true);
+    setAuthRefresher(refresher);
+
+    const r = await authedFetch(
+      'http://x/y',
+      { method: 'POST' },
+      { interactiveReauth: true, operation: 'payout approval' }
+    );
+    expect(r.status).toBe(200);
+    expect(refresher).toHaveBeenCalledTimes(1);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('surfaces the permission-settings diagnosis on a second consecutive timeout', async () => {
+    // Re-pairing didn't unstick it → stop looping the QR and tell the user to
+    // check their signer's per-signature permission.
+    const { SignerTimeoutError } = require('./signer-errors.js');
+    mockHeaders.mockRejectedValue(new SignerTimeoutError('payout approval'));
+    const refresher = jest.fn().mockResolvedValue(true);
+    setAuthRefresher(refresher);
+
+    await expect(
+      authedFetch('http://x/y', { method: 'POST' }, { interactiveReauth: true, operation: 'payout approval' })
+    ).rejects.toThrow(/permission settings/i);
+    expect(refresher).toHaveBeenCalledTimes(1); // offered once, did not loop
+  });
+
+  it('propagates a timeout untouched when interactiveReauth is off', async () => {
+    // setNwcUri owns its own recovery, so it calls without interactiveReauth.
+    const { SignerTimeoutError } = require('./signer-errors.js');
+    mockHeaders.mockRejectedValue(new SignerTimeoutError('wallet connection'));
+    const refresher = jest.fn().mockResolvedValue(true);
+    setAuthRefresher(refresher);
+
+    await expect(authedFetch('http://x/y', {})).rejects.toThrow(/signer didn't respond/);
+    expect(refresher).not.toHaveBeenCalled();
+  });
+
+  it('propagates a user cancel with no reauth and no request', async () => {
+    const { SignerCancelledError } = require('./signer-errors.js');
+    mockHeaders.mockRejectedValue(new SignerCancelledError('payout approval'));
     const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue(res(200));
     const refresher = jest.fn().mockResolvedValue(true);
     setAuthRefresher(refresher);
 
     await expect(
       authedFetch('http://x/y', { method: 'POST' }, { interactiveReauth: true })
-    ).rejects.toThrow(/signer didn't respond/);
+    ).rejects.toThrow(/Cancelled/);
     expect(refresher).not.toHaveBeenCalled();
     expect(fetchSpy).not.toHaveBeenCalled();
   });

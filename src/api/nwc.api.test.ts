@@ -129,8 +129,10 @@ describe('clearNwcUri', () => {
       'http://localhost:3000/users/me/nwc',
       expect.objectContaining({ method: 'DELETE' })
     );
-    // DELETE /users/me/nwc is also moneyAuth — write-scope credential required.
-    expect(getNostrMoneyAuthHeaders).toHaveBeenCalled();
+    // Disconnect uses the READ credential (no live signer): revoking a grant
+    // can't move money, and must work even when the signer session has ended.
+    expect(getNostrAuthHeaders).toHaveBeenCalled();
+    expect(getNostrMoneyAuthHeaders).not.toHaveBeenCalled();
   });
 
   it('returns false and surfaces a toast on non-OK response', async () => {

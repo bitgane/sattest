@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { getBackendUrl } from './config.js';
 import { authedFetch } from './authed-fetch.js';
+import { SignerCancelledError, SignerTimeoutError } from './signer-errors.js';
 
 /**
  * Client for the backend's `/users/me/nwc*` endpoints. All of these manage the
@@ -139,7 +140,7 @@ export async function setNwcUri(
           ...(budgetWindow !== undefined ? { budgetWindow } : {}),
         }),
       },
-      { scope: 'write' }
+      { scope: 'write', operation: 'wallet connection' }
     );
 
     // 401 = the stored Nostr auth event has aged out (backend's freshness
@@ -156,6 +157,17 @@ export async function setNwcUri(
 
     return 'ok';
   } catch (error) {
+    // User cancelled the signer wait — quiet abort, no toast.
+    if (error instanceof SignerCancelledError) {
+      return 'failed';
+    }
+    // A signer timeout usually means a stale session (ended in the signer app);
+    // route it through the command's re-pair-then-retry path just like an
+    // expired credential. interactiveReauth is off for this call precisely so
+    // the command owns that UX.
+    if (error instanceof SignerTimeoutError) {
+      return 'auth-expired';
+    }
     // The write-scope auth plumbing throws (rather than returning a 401
     // response) when no credential is stored or when the read credential used
     // to fetch the single-use nonce has aged out. Both are recoverable by
@@ -179,11 +191,17 @@ export async function setNwcUri(
 /** Disconnect the caller's wallet. Silent success — surfaces a toast on failure. */
 export async function clearNwcUri(): Promise<boolean> {
   try {
-    // DELETE /users/me/nwc is also behind `moneyAuth` — write scope required.
+    // Disconnect deliberately uses the READ scope (cached credential, no live
+    // signer round-trip). Revoking a capability can't move money, so it doesn't
+    // need moneyAuth's nonce — and, more importantly, "turn it off" must never
+    // be harder than "turn it on": a user whose signer session has ended still
+    // has to be able to disconnect. The backend's DELETE /users/me/nwc is
+    // `nostrAuth` to match. interactiveReauth still pops the re-pair QR if even
+    // the cached read credential has aged out.
     const response = await authedFetch(`${getBackendUrl()}/users/me/nwc`, {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json' },
-    }, { interactiveReauth: true, scope: 'write' });
+    }, { interactiveReauth: true });
 
     if (!response.ok) {
       const errText = await response.text().catch(() => '');
@@ -192,9 +210,13 @@ export async function clearNwcUri(): Promise<boolean> {
 
     return true;
   } catch (error) {
+    if (error instanceof SignerCancelledError) {
+      return false;
+    }
     console.error('[clearNwcUri] Error:', error);
     vscode.window.showErrorMessage(
-      `Failed to disconnect wallet: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      `Failed to disconnect wallet: ${error instanceof Error ? error.message : 'Unknown error'}. ` +
+        'You can also revoke this connection directly in your wallet app (Alby Hub, Coinos, …).',
     );
     return false;
   }

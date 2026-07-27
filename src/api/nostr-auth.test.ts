@@ -89,11 +89,22 @@ describe('getNostrMoneyAuthHeaders (F4: nonce-bound write credential)', () => {
         headers: expect.objectContaining({ Authorization: expect.stringContaining('Nostr ') }),
       })
     );
-    // The fetched nonce is threaded into the fresh signing call.
-    expect(signMoneyAuthEvent).toHaveBeenCalledWith('server-nonce-123');
+    // The fetched nonce is threaded into the fresh signing call, along with the
+    // (here undefined) operation label the caller passed through.
+    expect(signMoneyAuthEvent).toHaveBeenCalledWith('server-nonce-123', undefined);
 
     const expectedEncoded = Buffer.from(JSON.stringify(signedWriteEvent)).toString('base64');
     expect(headers).toEqual({ Authorization: `Nostr ${expectedEncoded}` });
+  });
+
+  it('threads the operation label through to the signing call', async () => {
+    (getNostrAuthEvent as jest.Mock).mockResolvedValue(JSON.stringify({ kind: 22242 }));
+    jest.spyOn(global, 'fetch').mockResolvedValue(jsonResponse(200, { nonce: 'n7' }));
+    (signMoneyAuthEvent as jest.Mock).mockResolvedValue({ kind: 22242, sig: 'x' });
+
+    await getNostrMoneyAuthHeaders(undefined, 'payout approval');
+
+    expect(signMoneyAuthEvent).toHaveBeenCalledWith('n7', 'payout approval');
   });
 
   it('merges extra headers', async () => {
