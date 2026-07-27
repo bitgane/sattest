@@ -147,6 +147,12 @@ jest.mock('vscode', () => {
       showWarningMessage: jest.fn().mockResolvedValue(undefined),
       visibleTextEditors: [],
       onDidChangeActiveTextEditor: jest.fn().mockReturnValue({ dispose: jest.fn() }),
+      // Runs the task immediately with a stub progress reporter and returns its
+      // result — enough for tests to observe that a progress notice was shown
+      // and to drive its lifetime via the task's own promise.
+      withProgress: jest.fn().mockImplementation((_options: any, task: any) =>
+        task({ report: jest.fn() }, { isCancellationRequested: false, onCancellationRequested: jest.fn() })
+      ),
       createWebviewPanel: jest.fn().mockImplementation((viewType, title, viewColumn, options) => {
         return {
           webview: {
@@ -177,6 +183,11 @@ jest.mock('vscode', () => {
       Run: 1,
       Debug: 2,
       Coverage: 3,
+    },
+    ProgressLocation: {
+      SourceControl: 1,
+      Window: 10,
+      Notification: 15,
     },
     CodeLens: jest.fn().mockImplementation((range: any, command: any) => ({
       range,

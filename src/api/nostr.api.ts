@@ -213,10 +213,59 @@ const RELAY_CONNECT_TIMEOUT_MS = 5000;
 const REQUESTED_SIGNER_PERMS = ['get_public_key', 'sign_event:22242'];
 
 /**
+ * How long a signer request may run before we reassure the user it's still
+ * waiting on them. Well under the hard timeout: the point is to fill the
+ * otherwise-silent gap where a user, seeing nothing happen, wanders off or
+ * starts clicking other things. Fast auto-approvals settle well before this,
+ * so the happy path never shows the notice.
+ */
+const SIGNER_SLOW_NOTICE_MS = 6000;
+
+/** Human-facing label for the "waiting on your signer" progress notice. */
+function slowSignerTitle(operation: string): string {
+  return `Waiting for your Nostr signer to approve the ${operation}…`;
+}
+
+/**
  * Bound a NIP-46 round-trip so an unresponsive signer fails loudly instead of
- * hanging the caller forever.
+ * hanging the caller forever — and, if it runs long but hasn't timed out yet,
+ * surface a self-dismissing progress notice so the user knows the ball is in
+ * their court (open nsec.app / Amber and approve) instead of staring at nothing.
+ *
+ * The notice only appears after `SIGNER_SLOW_NOTICE_MS`, and is torn down the
+ * instant the request settles — success, error, or hard timeout — so a fast
+ * approval shows nothing and a slow one never leaves a stale toast behind.
  */
 async function withSignerTimeout<T>(work: Promise<T>, operation: string): Promise<T> {
+  // Resolves (never rejects) once we're done, whichever way it went. Drives the
+  // dismissal of the progress notice.
+  let finishNotice!: () => void;
+  const noticeDone = new Promise<void>((resolve) => {
+    finishNotice = resolve;
+  });
+  let settled = false;
+
+  const noticeTimer = setTimeout(() => {
+    if (settled) {
+      return; // already finished during the grace window — don't flash a notice
+    }
+    // A Notification-location progress spins until its task promise resolves;
+    // we resolve `noticeDone` in the finally below, so it clears on its own.
+    void vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: slowSignerTitle(operation),
+        cancellable: false,
+      },
+      async (progress) => {
+        progress.report({
+          message: 'Open your signer (nsec.app tab / Amber) and approve the request.',
+        });
+        await noticeDone;
+      }
+    );
+  }, SIGNER_SLOW_NOTICE_MS);
+
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
@@ -226,9 +275,12 @@ async function withSignerTimeout<T>(work: Promise<T>, operation: string): Promis
       }),
     ]);
   } finally {
+    settled = true;
+    clearTimeout(noticeTimer);
     if (timer) {
       clearTimeout(timer);
     }
+    finishNotice(); // dismiss the progress notice if it was showing
   }
 }
 

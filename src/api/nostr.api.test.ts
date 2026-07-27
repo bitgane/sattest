@@ -771,6 +771,63 @@ describe('signMoneyAuthEvent', () => {
       .mockResolvedValue(JSON.stringify(BUNKER_POINTER));
     (BunkerSigner.fromBunker as jest.Mock).mockReset();
     sharedPool.close.mockReset();
+    // Default: run the progress task immediately (matches the global mock).
+    (vscode.window.withProgress as jest.Mock)
+      .mockReset()
+      .mockImplementation((_opts: any, task: any) => task({ report: jest.fn() }));
+  });
+
+  it('shows no "waiting on signer" notice when the signer answers promptly', async () => {
+    (BunkerSigner.fromBunker as jest.Mock).mockReturnValue({
+      signEvent: jest.fn().mockResolvedValue({ kind: 22242, sig: 'fast' }),
+    });
+
+    await signMoneyAuthEvent('server-nonce-abc');
+
+    // Happy path settles well under the 6s grace window — no toast flashed.
+    expect(vscode.window.withProgress).not.toHaveBeenCalled();
+  });
+
+  it('surfaces a self-dismissing "waiting on signer" notice when the request runs long', async () => {
+    jest.useFakeTimers();
+    try {
+      // Capture the progress task so we can observe when the notice dismisses.
+      let taskPromise: Promise<unknown> | undefined;
+      (vscode.window.withProgress as jest.Mock).mockImplementation((_opts: any, task: any) => {
+        taskPromise = Promise.resolve(task({ report: jest.fn() }));
+        return taskPromise;
+      });
+
+      // Signer answers only after the 6s notice threshold, before the 60s timeout.
+      let resolveSign!: (v: unknown) => void;
+      (BunkerSigner.fromBunker as jest.Mock).mockReturnValue({
+        signEvent: jest.fn().mockReturnValue(new Promise((r) => { resolveSign = r; })),
+      });
+
+      const pending = signMoneyAuthEvent('server-nonce-abc');
+
+      // Cross the notice threshold — the progress notice appears.
+      await jest.advanceTimersByTimeAsync(6500);
+      expect(vscode.window.withProgress).toHaveBeenCalledTimes(1);
+      const [opts] = (vscode.window.withProgress as jest.Mock).mock.calls[0];
+      expect(opts.location).toBe(vscode.ProgressLocation.Notification);
+      expect(opts.title).toMatch(/Waiting for your Nostr signer/i);
+
+      // The notice stays up (task promise pending) until the request settles…
+      let noticeCleared = false;
+      void taskPromise!.then(() => { noticeCleared = true; });
+      await Promise.resolve();
+      expect(noticeCleared).toBe(false);
+
+      // …now the signer answers → notice dismisses, call resolves.
+      resolveSign({ kind: 22242, sig: 'late' });
+      await jest.advanceTimersByTimeAsync(0);
+      await pending;
+      await Promise.resolve();
+      expect(noticeCleared).toBe(true);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   it('times out (instead of hanging) when the signer never answers', async () => {
