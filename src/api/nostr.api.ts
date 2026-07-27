@@ -280,7 +280,7 @@ async function withSignerTimeout<T>(
       },
       async (progress, token) => {
         progress.report({
-          message: 'Open your signer (nsec.app tab / Amber) and approve the request.',
+          message: 'Open your signer (Primal / Profile / Remote Login) and approve the request.',
         });
         if (token.isCancellationRequested) {
           rejectRace?.(new SignerCancelledError(operation));

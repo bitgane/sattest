@@ -502,12 +502,19 @@ export async function getPendingClaim(
  * submitting a later claim to redirect the payout to their own LNURL).
  * @param bountyId  - The bounty UUID
  * @param claimId   - The specific claim UUID to approve (from getPendingClaim)
- * @returns The updated bounty data if successful, null on failure
+ * @returns
+ *   - `BountyInfo` on a fresh successful approval,
+ *   - `'already-approved'` when the backend reports this claim was already paid
+ *     (a duplicate/concurrent approve — benign, the payout happened),
+ *   - `'in-progress'` when another approve is currently handling this claim,
+ *   - `null` on a genuine failure (an error toast was already shown) or user cancel.
  */
+export type ApproveClaimResult = BountyInfo | 'already-approved' | 'in-progress' | null;
+
 export async function approveClaim(
   bountyId: string,
   claimId: string
-): Promise<BountyInfo | null> {
+): Promise<ApproveClaimResult> {
   try {
     const response = await authedFetch(
       `${getBackendUrl()}/bounties/${encodeURIComponent(bountyId)}/approve`,
@@ -521,8 +528,10 @@ export async function approveClaim(
 
     if (!response.ok) {
       let errorMessage = `Approval failed: ${response.status}`;
+      let code: string | undefined;
       try {
         const errorData = await response.json();
+        code = errorData.code;
         // The NWC payout failure (502) returns the real reason in `error`
         // (e.g. "reply timeout", "wallet offline", "insufficient budget").
         // The generic 500 puts dev-mode detail in `message`. Prefer whichever
@@ -536,6 +545,17 @@ export async function approveClaim(
       } catch {
         // Ignore JSON parse error if response is not JSON
       }
+
+      // A duplicate/concurrent approve (double-click, second window) is not a
+      // real failure — the first one already paid out (or is paying). Report it
+      // benignly so the caller never shows "Failed" next to the success toast.
+      if (code === 'CLAIM_ALREADY_APPROVED') {
+        return 'already-approved';
+      }
+      if (code === 'CLAIM_IN_PROGRESS') {
+        return 'in-progress';
+      }
+
       throw new Error(errorMessage);
     }
 

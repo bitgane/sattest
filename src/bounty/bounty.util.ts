@@ -577,8 +577,15 @@ export const claimBountyCommand = (
 export const approveClaimCommand = (
   bounties: Map<string, BountyInfo>,
   onBountiesChangedEmitter: vscode.EventEmitter<void>
-) =>
-  vscode.commands.registerCommand('sattest.approveClaim', async (test?: vscode.TestItem) => {
+) => {
+  // Approvals in flight, keyed by bounty id. The signer round-trip + NWC payout
+  // can take many seconds, during which the "✅ Approve Claim" lens stays
+  // clickable — a second click used to fire a second /approve that landed after
+  // the first, surfacing a contradictory "Claim is not pending" failure toast
+  // next to the success. Guarding here stops the duplicate request at the source.
+  const inFlight = new Set<string>();
+
+  return vscode.commands.registerCommand('sattest.approveClaim', async (test?: vscode.TestItem) => {
     if (!test || !test.id) {
       vscode.window.showErrorMessage('No test selected');
       return;
@@ -596,6 +603,13 @@ export const approveClaimCommand = (
     const userNostrPubkey = await getNostrUserPubkey();
     if (bounty.creatorId !== userNostrPubkey) {
       vscode.window.showErrorMessage('Not authorized to approve this claim');
+      return;
+    }
+
+    // Ignore a second click while an approval for this bounty is already
+    // running (the payout can take a while — see `inFlight` above).
+    if (inFlight.has(bounty.id)) {
+      vscode.window.showInformationMessage('This claim is already being approved…');
       return;
     }
 
@@ -673,28 +687,44 @@ export const approveClaimCommand = (
       }
     }
 
+    inFlight.add(bounty.id);
     try {
-      const updatedBounty = await approveClaim(bounty.id, pendingClaim.id);
-      if (!updatedBounty) {
+      const result = await approveClaim(bounty.id, pendingClaim.id);
+      if (!result) {
         // approveClaim() handles its own error toast (e.g. the backend's 502
         // with the real NWC failure reason) and returns null. Bail here so we
         // don't also show a contradictory "payout triggered" success toast.
         return;
       }
 
-      // Update local state. Guard against an empty/missing claims array —
-      // shouldn't happen on the approve path but cheaper than a crash.
+      if (result === 'in-progress') {
+        // Another approve (e.g. a second VS Code window) is handling this claim
+        // right now. Not our success to claim, not a failure either.
+        vscode.window.showInformationMessage('This claim is already being approved…');
+        return;
+      }
+
+      // Fresh success, or the backend told us it was already approved (a
+      // duplicate that raced us). Either way the claim is approved and paid —
+      // reflect that locally and show the success toast, never a failure.
       if (bounty.claims?.[0]) {
         bounty.claims[0].status = claimStatusApproved;
       }
       bounties.set(test.id, bounty);
       onBountiesChangedEmitter.fire();
 
-      vscode.window.showInformationMessage(`Claim approved – payout triggered!`);
+      vscode.window.showInformationMessage(
+        result === 'already-approved'
+          ? 'This claim was already approved — payout completed.'
+          : 'Claim approved – payout triggered!'
+      );
     } catch (err) {
       vscode.window.showErrorMessage(`Approval error: ${err}`);
+    } finally {
+      inFlight.delete(bounty.id);
     }
   });
+};
 
 // Helper to get wallet ID (optional, but nice for debugging)
 export async function getWalletId(url: string, key: string): Promise<string | undefined> {

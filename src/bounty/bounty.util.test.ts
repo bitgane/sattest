@@ -1257,6 +1257,96 @@ describe('approveClaimCommand', () => {
     );
   });
 
+  it('shows a benign success (never a failure) when the backend says already-approved', async () => {
+    // The exact double-toast bug: a duplicate approve of an already-paid claim
+    // must show only a benign note, never "Failed to approve claim".
+    (getNostrUserPubkey as jest.Mock).mockResolvedValue('creator-pubkey');
+    const bounties = new Map<string, BountyInfo>();
+    bounties.set('test-id', {
+      id: 'bounty-uuid',
+      amountSats: 10000,
+      testId: 'test-id',
+      creatorId: 'creator-pubkey',
+      claims: [{ status: 'pending' as ClaimStatus }],
+    } as BountyInfo);
+    const mockEmitter = { fire: jest.fn() } as any;
+
+    (vscode.window.showWarningMessage as jest.Mock).mockResolvedValue('Yes, Approve Payout');
+    (approveClaimApi as jest.Mock).mockResolvedValue('already-approved');
+
+    approveClaimCommand(bounties, mockEmitter);
+    await capturedHandler!(createMockTestItem({ id: 'test-id' }));
+
+    expect(bounties.get('test-id')!.claims[0].status).toBe('approved');
+    expect(vscode.window.showInformationMessage).toHaveBeenCalledWith(
+      expect.stringMatching(/already approved/i)
+    );
+    expect(vscode.window.showErrorMessage).not.toHaveBeenCalled();
+  });
+
+  it('shows a neutral "already being approved" note (no success, no failure) on in-progress', async () => {
+    (getNostrUserPubkey as jest.Mock).mockResolvedValue('creator-pubkey');
+    const bounties = new Map<string, BountyInfo>();
+    bounties.set('test-id', {
+      id: 'bounty-uuid',
+      amountSats: 10000,
+      testId: 'test-id',
+      creatorId: 'creator-pubkey',
+      claims: [{ status: 'pending' as ClaimStatus }],
+    } as BountyInfo);
+    const mockEmitter = { fire: jest.fn() } as any;
+
+    (vscode.window.showWarningMessage as jest.Mock).mockResolvedValue('Yes, Approve Payout');
+    (approveClaimApi as jest.Mock).mockResolvedValue('in-progress');
+
+    approveClaimCommand(bounties, mockEmitter);
+    await capturedHandler!(createMockTestItem({ id: 'test-id' }));
+
+    expect(vscode.window.showInformationMessage).toHaveBeenCalledWith(
+      expect.stringMatching(/already being approved/i)
+    );
+    expect(vscode.window.showErrorMessage).not.toHaveBeenCalled();
+    // Not our success to claim → don't falsely flip local state to approved.
+    expect(bounties.get('test-id')!.claims[0].status).toBe('pending');
+  });
+
+  it('ignores a second approve for the same bounty while one is in flight', async () => {
+    (getNostrUserPubkey as jest.Mock).mockResolvedValue('creator-pubkey');
+    const bounties = new Map<string, BountyInfo>();
+    bounties.set('test-id', {
+      id: 'bounty-uuid',
+      amountSats: 10000,
+      testId: 'test-id',
+      creatorId: 'creator-pubkey',
+      claims: [{ status: 'pending' as ClaimStatus }],
+    } as BountyInfo);
+    const mockEmitter = { fire: jest.fn() } as any;
+
+    (vscode.window.showWarningMessage as jest.Mock).mockResolvedValue('Yes, Approve Payout');
+    // Hold the first approve open so the second click lands while it's in flight.
+    let resolveApprove!: (v: unknown) => void;
+    (approveClaimApi as jest.Mock).mockReturnValue(
+      new Promise((r) => { resolveApprove = r; })
+    );
+
+    approveClaimCommand(bounties, mockEmitter);
+    const first = capturedHandler!(createMockTestItem({ id: 'test-id' }));
+    // Let the first reach the in-flight approve call.
+    await new Promise((r) => setImmediate(r));
+    const second = capturedHandler!(createMockTestItem({ id: 'test-id' }));
+    await second;
+
+    // The second click was ignored — only one /approve request went out.
+    expect(approveClaimApi).toHaveBeenCalledTimes(1);
+    expect(vscode.window.showInformationMessage).toHaveBeenCalledWith(
+      expect.stringMatching(/already being approved/i)
+    );
+
+    resolveApprove({ id: 'bounty-uuid', claims: [{ status: 'approved' }] });
+    await first;
+    expect(approveClaimApi).toHaveBeenCalledTimes(1);
+  });
+
   it('approves a private claim without ever showing the hidden address', async () => {
     (getNostrUserPubkey as jest.Mock).mockResolvedValue('creator-pubkey');
     // Backend redacted the destination for a private claim: no LNURL, flagged hidden.

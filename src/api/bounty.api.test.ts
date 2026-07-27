@@ -759,6 +759,32 @@ describe('approveClaim', () => {
     const result = await approveClaim('bounty-1', 'approver-pub');
     expect(result).toBeNull();
   });
+
+  it('returns "already-approved" (no error toast) on a duplicate approve of a paid claim', async () => {
+    // Backend's benign 409 for a claim that a prior/concurrent approve already
+    // paid out — must NOT surface a "Failed to approve claim" toast.
+    jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: false,
+      status: 409,
+      json: async () => ({ error: 'Claim already approved', code: 'CLAIM_ALREADY_APPROVED' }),
+    } as any);
+
+    const result = await approveClaim('bounty-1', 'approver-pub');
+    expect(result).toBe('already-approved');
+    expect(vscode.window.showErrorMessage).not.toHaveBeenCalled();
+  });
+
+  it('returns "in-progress" (no error toast) when another approve is mid-flight', async () => {
+    jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: false,
+      status: 409,
+      json: async () => ({ error: 'This claim is already being approved', code: 'CLAIM_IN_PROGRESS' }),
+    } as any);
+
+    const result = await approveClaim('bounty-1', 'approver-pub');
+    expect(result).toBe('in-progress');
+    expect(vscode.window.showErrorMessage).not.toHaveBeenCalled();
+  });
 });
 
 describe('getLnurlLimits', () => {
