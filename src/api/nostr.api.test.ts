@@ -248,7 +248,7 @@ describe('connectNostr', () => {
     expect(html).not.toContain('class="connected"');
   });
 
-  it('shows the generic notice alongside the "Connected as" banner when an identity is already active', async () => {
+  it('suppresses the green "Connected as" banner while the refresh notice is showing', async () => {
     const state = require('../state');
     (state.getNostrUserPubkey as jest.Mock).mockResolvedValue('a'.repeat(64));
     (state.getNostrUserHandle as jest.Mock).mockResolvedValue('bitgane');
@@ -260,11 +260,27 @@ describe('connectNostr', () => {
 
     const html = (vscode.window.createWebviewPanel as jest.Mock).mock.results.at(-1)!.value
       .webview.html as string;
-    // The notice stays generic — connecting here is never tied to the
-    // already-paired identity, so any Nostr identity may complete it.
+    // The refresh/reconnect notice is the whole point of this flow, so it wins…
     expect(html).toContain('class="notice-action"');
     expect(html).toContain('Refresh your Nostr login to complete your wallet connection.');
-    // The green "Connected as" banner still shows, independent of the notice.
+    // …and the green banner is suppressed — the two contradict each other at a
+    // glance ("Connected as @alice" next to "Refresh your Nostr connection").
+    expect(html).not.toContain('class="connected"');
+    expect(html).not.toContain('Connected as @bitgane');
+  });
+
+  it('shows the green "Connected as" banner when no refresh notice is present', async () => {
+    const state = require('../state');
+    (state.getNostrUserPubkey as jest.Mock).mockResolvedValue('a'.repeat(64));
+    (state.getNostrUserHandle as jest.Mock).mockResolvedValue('bitgane');
+    handshakeFails();
+
+    // Plain "Connect Nostr" (no noticeMessage) opened while already connected.
+    await connectNostr(mockContext, mockEmitter);
+
+    const html = (vscode.window.createWebviewPanel as jest.Mock).mock.results.at(-1)!.value
+      .webview.html as string;
+    expect(html).not.toContain('class="notice-action"');
     expect(html).toContain('class="connected"');
     expect(html).toContain('Connected as @bitgane');
   });

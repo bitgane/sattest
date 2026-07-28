@@ -514,11 +514,17 @@ export async function connectNostr(
     ? `<div class="notice-action">${escapeHtml(noticeText)}</div>`
     : '';
 
-  // Green "Connected as" banner — shown whenever an identity is already
-  // connected, independent of the notice above.
-  const connectedBannerHtml = identityDisplay
-    ? `<div class="connected">Connected as ${escapeHtml(identityDisplay)}</div>`
-    : '';
+  // Green "Connected as" banner — shown when an identity is already connected.
+  //
+  // Mutually exclusive with the yellow refresh/reconnect notice: those two
+  // contradict each other at a glance ("Connected as @alice" next to "Refresh
+  // your Nostr connection"). When a notice is present the flow's whole point is
+  // that the session needs re-pairing, so the notice wins and the green banner
+  // is suppressed.
+  const connectedBannerHtml =
+    identityDisplay && !noticeText
+      ? `<div class="connected">Connected as ${escapeHtml(identityDisplay)}</div>`
+      : '';
 
   // Full QR view — built now but NOT painted yet. We reveal it only after the
   // signer-response subscription has had a moment to go live (see below), so
