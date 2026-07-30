@@ -60,42 +60,42 @@
       {
         "command": "sattest.addBounty",
         "title": "Add Bounty",
-        "category": "Bounty"
+        "category": "Sattest Bounty"
       },
       {
         "command": "sattest.checkPaid",
         "title": "Check Bounty Paid",
-        "category": "Bounty"
+        "category": "Sattest Bounty"
       },
       {
         "command": "sattest.claimBounty",
         "title": "Claim Bounty",
-        "category": "Claim"
+        "category": "Sattest Claim"
       },
       {
         "command": "sattest.removeBounty",
         "title": "Remove Bounty",
-        "category": "Bounty"
+        "category": "Sattest Bounty"
       },
       {
         "command": "sattest.connectNostr",
         "title": "Connect Nostr",
-        "category": "Nostr"
+        "category": "Sattest Nostr"
       },
       {
         "command": "sattest.approveClaim",
         "title": "Approve Claim",
-        "category": "Claim"
+        "category": "Sattest Claim"
       },
       {
         "command": "sattest.connectWallet",
         "title": "Connect Lightning Wallet (NWC)",
-        "category": "Bounty"
+        "category": "Sattest Bounty"
       },
       {
         "command": "sattest.disconnectWallet",
         "title": "Disconnect Lightning Wallet (NWC)",
-        "category": "Bounty"
+        "category": "Sattest Bounty"
       }
     ],
     "keybindings": [
@@ -123,8 +123,7 @@
           "default": [
             "wss://relay.damus.io",
             "wss://relay.primal.net",
-            "wss://nos.lol",
-            "wss://relay.nsec.app"
+            "wss://nos.lol"
           ],
           "scope": "machine",
           "markdownDescription": "Nostr relay WebSocket URLs used for the NIP-46 signer connection. **Machine-scoped**: only your User settings can change it, never a workspace's `.vscode/settings.json`, so a repo can't redirect signer traffic to attacker-controlled relays. Entries must be `wss://` (or `ws://localhost` for local development); others are ignored."
