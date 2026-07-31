@@ -1,6 +1,14 @@
 # Sattest – Lightning Bounties for VS Code Tests
 
-**Sattest** turns your test suite into a bounty board. Attach a Bitcoin Lightning bounty to any failing test; when you approve a contributor's claim, the satoshis move **directly from your own Lightning wallet to theirs** — non-custodially, over [Nostr Wallet Connect (NIP-47)](https://nips.nostr.com/47). Sattest never holds your funds.
+**Sattest** turns your tests into bounties! Attach a Bitcoin bounty to any unit test; when you approve a contributor's claim, sats move **directly from your own Lightning wallet to theirs** — non-custodially, over [Nostr Wallet Connect (NIP-47)](https://nips.nostr.com/47). Sattest never holds your funds.
+
+Do you...
+- have tests, but not the time to get them to pass?
+- have difficulty getting old tests to pass?
+- want to encourage test-driven development (TDD) on your team?
+- or just want to add some fun to your test suite?
+
+...**Sattest** let's you accomplish this non-custodially, using Nostr and Lightning!
 
 ## Features
 

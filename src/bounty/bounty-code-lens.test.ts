@@ -311,6 +311,44 @@ describe('BountyCodeLensProvider', () => {
       expect(claimable).toBeUndefined();
     });
 
+    it('lets the CREATOR click the "Payout Processing" lens to re-check a held payout', () => {
+      // A payout whose outcome was never confirmed leaves the claim locked. The
+      // creator needs a way to ask their wallet what happened — without this the
+      // claim is stuck until someone runs SQL, which is exactly the dead end this
+      // lens is here to prevent. (The backend still reconciles before paying, so
+      // the click can't double-spend.)
+      const uri = vscode.Uri.file('/mock/workspace/foo.test.ts');
+      const mockItem = {
+        id: 'test-1',
+        label: 'my test',
+        uri,
+        range: new vscode.Range(5, 0, 5, 10),
+        children: [],
+      };
+      (findTestItemById as jest.Mock).mockReturnValue(mockItem);
+
+      bounties.set(
+        'test-1',
+        createBounty({
+          invoicePaid: true,
+          paymentHash: 'hash',
+          creatorId: 'creator-pub',
+          claims: [{ status: 'approving' } as ClaimInfo],
+        })
+      );
+      // Viewing as the creator this time.
+      provider = new BountyCodeLensProvider(bounties, emitter, 'creator-pub');
+
+      const lenses = provider.provideCodeLenses(createMockDocument()) as vscode.CodeLens[];
+
+      const processingLens = lenses.find((l) => l.command?.title.includes('Payout Processing'));
+      expect(processingLens?.command?.command).toBe('sattest.approveClaim');
+      expect(processingLens?.command?.tooltip).toMatch(/re-check/i);
+      // Still not re-claimable, and no separate "Approve Claim" lens appears.
+      expect(lenses.find((l) => l.command?.command === 'sattest.claimBounty')).toBeUndefined();
+      expect(lenses.filter((l) => l.command?.command === 'sattest.approveClaim')).toHaveLength(1);
+    });
+
     it('Approve Claim lens passes the TestItem (not the testId string) as the first command arg', () => {
       // Regression: passing `[testId, item]` here meant the click handler
       // received a string, did `string.id` → undefined, and toasted

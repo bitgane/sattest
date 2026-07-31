@@ -785,6 +785,40 @@ describe('approveClaim', () => {
     expect(result).toBe('in-progress');
     expect(vscode.window.showErrorMessage).not.toHaveBeenCalled();
   });
+
+  it('returns "outcome-unknown" (no error toast) when the payout could not be confirmed', async () => {
+    // The wallet got the request but never confirmed. Showing "Failed to
+    // approve" here would push the creator to resend — and a resend pays a
+    // second invoice. It must not be reported as a failure.
+    jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: false,
+      status: 502,
+      json: async () => ({
+        error: 'Sattest could not confirm this payout with your wallet.',
+        code: 'PAYOUT_OUTCOME_UNKNOWN',
+      }),
+    } as any);
+
+    const result = await approveClaim('bounty-1', 'approver-pub');
+    expect(result).toBe('outcome-unknown');
+    expect(vscode.window.showErrorMessage).not.toHaveBeenCalled();
+  });
+
+  it('still surfaces a genuine 502 payout failure as an error', async () => {
+    // Contrast with the case above: an outcome-less 502 (wallet declined) is a
+    // real failure and should still toast.
+    jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: false,
+      status: 502,
+      json: async () => ({ error: 'budget exceeded' }),
+    } as any);
+
+    const result = await approveClaim('bounty-1', 'approver-pub');
+    expect(result).toBeNull();
+    expect(vscode.window.showErrorMessage).toHaveBeenCalledWith(
+      expect.stringMatching(/budget exceeded/)
+    );
+  });
 });
 
 describe('getLnurlLimits', () => {

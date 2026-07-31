@@ -509,7 +509,12 @@ export async function getPendingClaim(
  *   - `'in-progress'` when another approve is currently handling this claim,
  *   - `null` on a genuine failure (an error toast was already shown) or user cancel.
  */
-export type ApproveClaimResult = BountyInfo | 'already-approved' | 'in-progress' | null;
+export type ApproveClaimResult =
+  | BountyInfo
+  | 'already-approved'
+  | 'in-progress'
+  | 'outcome-unknown'
+  | null;
 
 export async function approveClaim(
   bountyId: string,
@@ -554,6 +559,14 @@ export async function approveClaim(
       }
       if (code === 'CLAIM_IN_PROGRESS') {
         return 'in-progress';
+      }
+      // The payout was sent to the wallet but never confirmed back. It may
+      // have gone through — reporting this as a plain failure would invite a
+      // retry, and a retry pays a second invoice. The backend keeps the claim
+      // locked and reconciles it; the caller just has to say so honestly.
+      if (code === 'PAYOUT_OUTCOME_UNKNOWN') {
+        console.warn('[approveClaim] payout outcome unknown:', errorMessage);
+        return 'outcome-unknown';
       }
 
       throw new Error(errorMessage);

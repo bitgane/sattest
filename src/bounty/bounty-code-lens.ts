@@ -88,12 +88,22 @@ export class BountyCodeLensProvider implements vscode.CodeLensProvider {
             ? 'Use the Approve Claim action below to release the payout'
             : 'Waiting for the creator to approve your claim';
       } else if (claimStatus === claimStatusApproving) {
-        // Payout is mid-flight (claim locked, Lightning payment settling).
-        // Purely informational — no claim/approve action, so the bounty can't
-        // be re-claimed or double-approved during the window.
+        // Payout is mid-flight (claim locked, Lightning payment settling), or
+        // the outcome of an earlier attempt was never confirmed and the claim
+        // is being held so it can't be paid twice.
+        //
+        // The claimant gets a purely informational lens — they must not be able
+        // to re-claim or approve during the window. The creator gets a way back
+        // in: clicking asks their wallet what actually happened (the backend
+        // reconciles before it will pay anything), which is the only route out
+        // of a held claim short of an operator running SQL.
+        const isCreator =
+          !!this.userNostrPubkey && bounty.creatorId === this.userNostrPubkey;
         title = `💸 Payout Processing (${bounty.amountSats} sats)${badge}`;
-        command = '';
-        tooltip = 'Payout in progress — waiting for the Lightning payment to settle';
+        command = isCreator ? 'sattest.approveClaim' : '';
+        tooltip = isCreator
+          ? 'Payout in progress. If it seems stuck, click to re-check it with your wallet — Sattest only sends again if your wallet confirms the payment did not go through.'
+          : 'Payout in progress — waiting for the Lightning payment to settle';
       } else if (claimStatus === claimStatusApproved) {
         title = `💰 Claim Approved – Payout Sent (${bounty.amountSats} sats)${badge}`;
       } else if (bounty.invoicePaid) {

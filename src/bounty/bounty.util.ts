@@ -1,6 +1,11 @@
 import * as vscode from 'vscode';
 import { toString } from 'qrcode';
-import { BountyInfo, claimStatusApproved, claimStatusPending } from './bounty.types.js';
+import {
+  BountyInfo,
+  claimStatusApproved,
+  claimStatusApproving,
+  claimStatusPending,
+} from './bounty.types.js';
 import {
   getRepoSlug,
   normalizedTestId,
@@ -645,16 +650,35 @@ export const approveClaimCommand = (
         lnurl.length > 50 ? `${lnurl.slice(0, 24)}…${lnurl.slice(-16)}` : lnurl;
     }
 
-    // Modal dialogs render VS Code's own Cancel button — passing an explicit
-    // 'Cancel' item here used to show two of them. Dismissal resolves to
-    // undefined, which the guard below already treats as "don't approve".
-    const confirmed = await vscode.window.showWarningMessage(
-      `Send ${bounty.amountSats} sats to:\n${destinationLine}`,
-      { modal: true, detail: `Bounty: "${test?.label}"` },
-      'Yes, Approve Payout'
-    );
+    // A claim already in `approving` is one whose payout outcome was never
+    // confirmed — the sats may or may not have left. Approving it again does
+    // NOT pay blind: the backend asks the wallet what happened first, and only
+    // pays if the wallet confirms the earlier attempt failed. Say that, rather
+    // than showing a "Send N sats" modal that misrepresents what the click does.
+    const isRecheck = pendingClaim.status === claimStatusApproving;
 
-    if (confirmed !== 'Yes, Approve Payout') {
+    const confirmed = isRecheck
+      ? await vscode.window.showWarningMessage(
+          `Re-check this ${bounty.amountSats} sat payout with your wallet?`,
+          {
+            modal: true,
+            detail:
+              'Sattest couldn\'t confirm the last attempt. It will ask your wallet ' +
+              'whether the payment went through, and only send again if your wallet ' +
+              'confirms it did not.',
+          },
+          'Re-check Payout'
+        )
+      : // Modal dialogs render VS Code's own Cancel button — passing an explicit
+        // 'Cancel' item here used to show two of them. Dismissal resolves to
+        // undefined, which the guard below already treats as "don't approve".
+        await vscode.window.showWarningMessage(
+          `Send ${bounty.amountSats} sats to:\n${destinationLine}`,
+          { modal: true, detail: `Bounty: "${test?.label}"` },
+          'Yes, Approve Payout'
+        );
+
+    if (confirmed !== (isRecheck ? 'Re-check Payout' : 'Yes, Approve Payout')) {
       return;
     }
 
@@ -701,6 +725,26 @@ export const approveClaimCommand = (
         // Another approve (e.g. a second VS Code window) is handling this claim
         // right now. Not our success to claim, not a failure either.
         vscode.window.showInformationMessage('This claim is already being approved…');
+        return;
+      }
+
+      if (result === 'outcome-unknown') {
+        // The payout request reached the wallet but no confirmation came back.
+        // It may well have been paid, so this is explicitly NOT reported as a
+        // failure — telling the creator it failed would push them to resend and
+        // pay the claimant twice. The backend holds the claim and reconciles it
+        // against the wallet on the next approve.
+        vscode.window.showWarningMessage(
+          'Couldn\'t confirm this payout — your wallet may have already sent it. ' +
+            'The claim is on hold so it can\'t be paid twice. Don\'t resend from ' +
+            'your wallet; click the "Payout Processing" lens in a minute to re-check.'
+        );
+        // Reflect the on-hold state so the lens stops offering Approve.
+        if (bounty.claims?.[0]) {
+          bounty.claims[0].status = claimStatusApproving;
+        }
+        bounties.set(test.id, bounty);
+        onBountiesChangedEmitter.fire();
         return;
       }
 
