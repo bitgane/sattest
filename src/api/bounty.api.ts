@@ -20,6 +20,16 @@ export interface FetchBountiesOptions {
 let lastFetchErrorToastAt = 0;
 const FETCH_ERROR_TOAST_COOLDOWN_MS = 10_000;
 
+// The "this workspace isn't a git repo" notice is a stable fact about the
+// workspace, not a transient error — surface it once per session rather than
+// on every refresh.
+let warnedNoRepo = false;
+
+/** Reset the once-per-session notice. Test-only. */
+export function _resetRepoWarningForTests(): void {
+  warnedNoRepo = false;
+}
+
 // Backend's `/bounties/filter` rejects requests with more than this many test
 // IDs as a DoS guard. We respect it by chunking large workspaces into
 // successive requests and merging the results client-side.
@@ -27,6 +37,24 @@ const FILTER_CHUNK_SIZE = 500;
 
 export async function fetchBounties(options: FetchBountiesOptions = {}): Promise<BountyInfo[]> {
   const { testId, includeInactive = false, repo, testIds } = options;
+
+  // Git repo required — enforced here, at the single choke point every caller
+  // goes through, so a new call site can't quietly reintroduce an unscoped
+  // fetch. The backend rejects a missing scope with 400/REPO_REQUIRED anyway;
+  // this stops the request from being made at all, which is the point: an
+  // unscoped listing returns far more than any workspace needs and is the
+  // reconnaissance an attacker uses to time a competing claim.
+  if (!repo || !repo.trim()) {
+    if (!warnedNoRepo) {
+      warnedNoRepo = true;
+      vscode.window.showInformationMessage(
+        'Sattest needs a git repository with an "origin" remote — bounties are scoped per repo. ' +
+          'Open a folder that has one to see and create bounties.'
+      );
+    }
+    return [];
+  }
+
   try {
     // Large workspaces can blow past the per-request testIds cap. Split into
     // chunks, fire them in parallel, and merge — de-duplicating by bounty id
@@ -453,45 +481,61 @@ export async function setBountyCreator(
   }
 }
 
-/**
- * Retrieves the current pending claim on a bounty so the creator can review
- * the payout destination (claimantLnurl) before confirming approval. Only the
- * bounty creator can call this endpoint; returns null when there is no pending
- * claim or the request fails.
- */
-export async function getPendingClaim(
-  bountyId: string
-): Promise<{
+export interface PendingClaim {
   id: string;
   claimantLnurl: string | null;
+  /**
+   * Authenticated Nostr pubkey of the claimant. This — not the LNURL — is what
+   * ties a claim to the contributor the creator vetted out-of-band, so it stays
+   * visible even when the claimant hid their payout address. `null` only for
+   * legacy claims filed before the backend recorded identity.
+   */
+  claimantPubkey: string | null;
   claimedAt: string;
   status: string;
   lnurlHidden: boolean;
-} | null> {
+}
+
+/**
+ * Retrieves the open claims on a bounty so the creator can review who is being
+ * paid, and where, before confirming. Only the bounty creator can call this;
+ * returns an empty array when there is no open claim or the request fails.
+ *
+ * Returns ALL open claims, not just the newest. The backend used to pick the
+ * newest for us, which meant the payout recipient was chosen by an ordering an
+ * attacker controls: file a claim after the real contributor and you become the
+ * one the creator approves. Only the creator can say which claim corresponds to
+ * the work they reviewed, so the choice belongs to them.
+ */
+export async function getPendingClaims(bountyId: string): Promise<PendingClaim[]> {
   try {
     const response = await authedFetch(
       `${getBackendUrl()}/bounties/${encodeURIComponent(bountyId)}/pending-claim`,
       { method: 'GET' }
     );
     if (!response.ok) {
-      return null;
+      return [];
     }
     const data = await response.json();
-    // A private claim intentionally omits `claimantLnurl` (backend redacts it),
-    // so only require the `id` here — that's what binds the approval. Fall back
-    // to a false `lnurlHidden` for older backends that don't send the flag.
-    if (!data?.id) {
-      return null;
-    }
-    return {
-      id: data.id,
-      claimantLnurl: data.claimantLnurl ?? null,
-      claimedAt: data.claimedAt,
-      status: data.status,
-      lnurlHidden: data.lnurlHidden === true,
-    };
+
+    // Newer backends send `claims[]`; older ones send a single claim at the top
+    // level. Normalize both into the array shape.
+    const raw = Array.isArray(data?.claims) ? data.claims : data?.id ? [data] : [];
+
+    // A private claim intentionally omits `claimantLnurl` (the backend redacts
+    // it), so only require `id` — that's what binds the approval.
+    return raw
+      .filter((c: { id?: string }) => Boolean(c?.id))
+      .map((c: Record<string, unknown>) => ({
+        id: c.id as string,
+        claimantLnurl: (c.claimantLnurl as string | undefined) ?? null,
+        claimantPubkey: (c.claimantPubkey as string | undefined) ?? null,
+        claimedAt: c.claimedAt as string,
+        status: c.status as string,
+        lnurlHidden: c.lnurlHidden === true,
+      }));
   } catch {
-    return null;
+    return [];
   }
 }
 
@@ -514,11 +558,13 @@ export type ApproveClaimResult =
   | 'already-approved'
   | 'in-progress'
   | 'outcome-unknown'
+  | 'claimant-changed'
   | null;
 
 export async function approveClaim(
   bountyId: string,
-  claimId: string
+  claimId: string,
+  claimantPubkey?: string | null
 ): Promise<ApproveClaimResult> {
   try {
     const response = await authedFetch(
@@ -526,7 +572,11 @@ export async function approveClaim(
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ claimId }),
+        // `claimantPubkey` names who we believe we're paying. The backend
+        // refuses to pay when several claims are open and no claimant is
+        // named, and rejects a mismatch — so a claim substituted between the
+        // creator's review and their click can't be paid by accident.
+        body: JSON.stringify({ claimId, ...(claimantPubkey ? { claimantPubkey } : {}) }),
       },
       { interactiveReauth: true, scope: 'write', operation: 'payout approval' }
     );
@@ -567,6 +617,18 @@ export async function approveClaim(
       if (code === 'PAYOUT_OUTCOME_UNKNOWN') {
         console.warn('[approveClaim] payout outcome unknown:', errorMessage);
         return 'outcome-unknown';
+      }
+      // The set of claims moved under us between review and approve, or the
+      // claim we named belongs to someone else. Not a failure to retry blindly
+      // — the creator has to look again at who they're paying.
+      if (
+        code === 'MULTIPLE_OPEN_CLAIMS' ||
+        code === 'CLAIMANT_MISMATCH' ||
+        code === 'CLAIMANT_UNVERIFIABLE'
+      ) {
+        console.warn(`[approveClaim] claimant binding rejected (${code}):`, errorMessage);
+        vscode.window.showWarningMessage(errorMessage);
+        return 'claimant-changed';
       }
 
       throw new Error(errorMessage);

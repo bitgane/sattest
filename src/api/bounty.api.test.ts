@@ -34,7 +34,10 @@ import {
   setBountyCreator,
   approveClaim,
   getLnurlLimits,
+  _resetRepoWarningForTests,
 } from './bounty.api.js';
+
+const REPO = 'owner/repo';
 
 describe('fetchBounties', () => {
   it('fetches all bounties and prepends workspace root', async () => {
@@ -48,7 +51,7 @@ describe('fetchBounties', () => {
       }),
     } as any);
 
-    const result = await fetchBounties();
+    const result = await fetchBounties({ repo: REPO });
     expect(result).toHaveLength(2);
     expect(result[0].testId).toBe('/mock/workspace/src/foo.test.ts#test1');
     expect(result[1].testId).toBe('/mock/workspace/src/bar.test.ts#test2');
@@ -66,7 +69,7 @@ describe('fetchBounties', () => {
       json: async () => ({ bounties: [] }),
     } as any);
 
-    await fetchBounties({ testId: 'my-test-id' });
+    await fetchBounties({ testId: 'my-test-id', repo: REPO });
     const callUrl = (global.fetch as jest.Mock).mock.calls[0][0];
     expect(callUrl.toString()).toContain('testId=my-test-id');
   });
@@ -77,7 +80,7 @@ describe('fetchBounties', () => {
       json: async () => ({ bounties: [] }),
     } as any);
 
-    await fetchBounties({ includeInactive: true });
+    await fetchBounties({ includeInactive: true, repo: REPO });
     const callUrl = (global.fetch as jest.Mock).mock.calls[0][0];
     expect(callUrl.toString()).toContain('includeInactive=true');
   });
@@ -88,7 +91,7 @@ describe('fetchBounties', () => {
       status: 500,
     } as any);
 
-    const result = await fetchBounties();
+    const result = await fetchBounties({ repo: REPO });
     expect(result).toEqual([]);
     expect(vscode.window.showErrorMessage).toHaveBeenCalledWith(
       'Failed to load bounties from backend'
@@ -98,7 +101,7 @@ describe('fetchBounties', () => {
   it('returns empty array on network error', async () => {
     jest.spyOn(global, 'fetch').mockRejectedValue(new Error('Network error'));
 
-    const result = await fetchBounties();
+    const result = await fetchBounties({ repo: REPO });
     expect(result).toEqual([]);
     // The toast is rate-limited (10s cooldown) and the prior failure case in
     // this suite already burned the window, so we only assert the empty-array
@@ -115,7 +118,7 @@ describe('fetchBounties', () => {
       }),
     } as any);
 
-    const [bounty] = await fetchBounties();
+    const [bounty] = await fetchBounties({ repo: REPO });
     expect(Array.isArray(bounty.claims)).toBe(true);
     expect(bounty.claims).toEqual([]);
   });
@@ -126,7 +129,7 @@ describe('fetchBounties', () => {
       json: async () => ({}),
     } as any);
 
-    const result = await fetchBounties();
+    const result = await fetchBounties({ repo: REPO });
     expect(result).toEqual([]);
   });
 
@@ -177,7 +180,7 @@ describe('fetchBounties', () => {
     });
 
     const ids = Array.from({ length: 1100 }, (_, i) => `/t${i}.test.ts#x`);
-    const result = await fetchBounties({ testIds: ids });
+    const result = await fetchBounties({ testIds: ids, repo: REPO });
 
     // 1100 / 500 = 3 chunks (500 + 500 + 100)
     expect(fetchSpy).toHaveBeenCalledTimes(3);
@@ -199,7 +202,7 @@ describe('fetchBounties', () => {
       json: async () => ({ bounties: [] }),
     } as any);
 
-    await fetchBounties({ testIds: Array.from({ length: 500 }, (_, i) => `/t${i}#x`) });
+    await fetchBounties({ testIds: Array.from({ length: 500 }, (_, i) => `/t${i}#x`), repo: REPO });
     expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 
@@ -212,6 +215,60 @@ describe('fetchBounties', () => {
     await fetchBounties({ repo: 'owner/repo' });
     const [, callOpts] = (global.fetch as jest.Mock).mock.calls[0];
     expect(callOpts).toEqual({});
+  });
+
+  // ── Git repo gate ──────────────────────────────────────────────────────
+  //
+  // Enforced at this choke point rather than at the call sites, so a new
+  // caller can't quietly reintroduce an unscoped fetch. An unscoped listing
+  // returns far more than a workspace needs and is the reconnaissance used to
+  // time a competing claim against an honest one.
+  describe('git repo gate', () => {
+    beforeEach(() => {
+      _resetRepoWarningForTests();
+    });
+
+    it('makes no request at all when there is no repo slug', async () => {
+      const fetchSpy = jest.spyOn(global, 'fetch');
+
+      const result = await fetchBounties({});
+
+      expect(result).toEqual([]);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it('makes no request for a blank repo slug', async () => {
+      const fetchSpy = jest.spyOn(global, 'fetch');
+
+      const result = await fetchBounties({ repo: '   ' });
+
+      expect(result).toEqual([]);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it('gates the testIds path too, not just the GET path', async () => {
+      const fetchSpy = jest.spyOn(global, 'fetch');
+
+      const result = await fetchBounties({ testIds: ['/a.test.ts#x'] });
+
+      expect(result).toEqual([]);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it('explains why nothing renders, once per session', async () => {
+      jest.spyOn(global, 'fetch');
+
+      await fetchBounties({});
+      await fetchBounties({});
+      await fetchBounties({});
+
+      // A workspace without a repo is a stable fact, not a transient error —
+      // saying it on every refresh would be noise.
+      expect(vscode.window.showInformationMessage).toHaveBeenCalledTimes(1);
+      expect(vscode.window.showInformationMessage).toHaveBeenCalledWith(
+        expect.stringContaining('git repository')
+      );
+    });
   });
 });
 

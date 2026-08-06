@@ -15,7 +15,7 @@ import {
   claimBountyWithLnAddress,
   deactivateBounty,
   approveClaim as approveClaimApi,
-  getPendingClaim as getPendingClaimApi,
+  getPendingClaims as getPendingClaimsApi,
 } from '../api/bounty.api.js';
 import { getNostrUserPubkey } from '../state.js';
 
@@ -67,13 +67,34 @@ jest.mock('../api/bounty.api', () => ({
   deactivateBounty: jest.fn(),
   setBountyCreator: jest.fn(),
   approveClaim: jest.fn(),
-  getPendingClaim: jest.fn(),
+  getPendingClaims: jest.fn(),
 }));
 
 jest.mock('../test/test-item.util', () => ({
   normalizedTestId: jest.fn().mockImplementation((test: any) => test.id),
   removeParentLabelFromTestId: jest.fn().mockImplementation((test: any) => test.id),
   getRepoSlug: jest.fn().mockReturnValue('owner/repo'),
+}));
+
+// Trailer lookup shells out to real git against the workspace root, which
+// doesn't exist under jest. Default to "the claimant's commit is in the
+// creator's branch" so the existing approve tests exercise the happy path;
+// the workflow-specific tests below override it. Real git behaviour is covered
+// against actual repositories in src/git/claim-trailer.test.ts.
+jest.mock('../git/claim-trailer', () => ({
+  CLAIM_TRAILER_KEY: 'Sattest-Claim',
+  verifyClaimTrailer: jest.fn(() => ({
+    evidence: 'in-history',
+    currentBranch: 'main',
+    commits: [{ sha: 'abc12345', subject: 'fix the test', refs: ['main'], inHistory: true }],
+  })),
+  addClaimTrailerToHead: jest.fn(() => 'abc12345'),
+  claimTrailerToken: jest.fn(() => 'deadbeefcafe0001'),
+  readCommitPatches: jest.fn(() => 'diff --git a/x b/x\n+fixed'),
+  headHasClaimTrailer: jest.fn(() => false),
+  hasCommits: jest.fn(() => true),
+  hasRemotes: jest.fn(() => true),
+  fetchAllRemotes: jest.fn(() => true),
 }));
 
 // Helpers
@@ -1109,6 +1130,9 @@ describe('approveClaimCommand', () => {
   let capturedHandler: ((test?: vscode.TestItem) => Promise<void>) | undefined;
 
   const MOCK_CLAIM_ID = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  const MOCK_CLAIMANT_PUBKEY = 'd'.repeat(64);
+  const MOCK_OTHER_CLAIM_ID = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+  const MOCK_ATTACKER_PUBKEY = 'e'.repeat(64);
 
   beforeEach(() => {
     jest.spyOn(vscode.commands, 'registerCommand').mockImplementation((id, handler) => {
@@ -1117,13 +1141,26 @@ describe('approveClaimCommand', () => {
       }
       return { dispose: jest.fn() } as any;
     });
-    // Default pending claim — gives the handler something to show in the confirm dialog
-    (getPendingClaimApi as jest.Mock).mockResolvedValue({
-      id: MOCK_CLAIM_ID,
-      claimantLnurl: 'lightning@example.com',
-      claimedAt: new Date().toISOString(),
-      status: 'pending',
+    // Trailer verification defaults back to "merged" for every test. Mock
+    // *implementations* survive jest.clearAllMocks(), so a test that stubs an
+    // unverified claim would otherwise leave every later test unverified — and
+    // an unverified claim now blocks on a modal.
+    const { verifyClaimTrailer } = require('../git/claim-trailer');
+    (verifyClaimTrailer as jest.Mock).mockReturnValue({
+      evidence: 'in-history',
+      currentBranch: 'main',
+      commits: [{ sha: 'abc12345', subject: 'fix the test', refs: ['main'], inHistory: true }],
     });
+    // Default pending claim — gives the handler something to show in the confirm dialog
+    (getPendingClaimsApi as jest.Mock).mockResolvedValue([
+      {
+        id: MOCK_CLAIM_ID,
+        claimantLnurl: 'lightning@example.com',
+        claimantPubkey: MOCK_CLAIMANT_PUBKEY,
+        claimedAt: new Date().toISOString(),
+        status: 'pending',
+      },
+    ]);
     // NWC bounties precheck the wallet before approving. Default to "connected"
     // so the happy-path tests proceed; the wallet-not-connected tests override.
     const { getNwcStatus } = require('../api/nwc.api');
@@ -1180,7 +1217,7 @@ describe('approveClaimCommand', () => {
       })
     );
 
-    expect(approveClaimApi).toHaveBeenCalledWith('bounty-uuid', MOCK_CLAIM_ID);
+    expect(approveClaimApi).toHaveBeenCalledWith('bounty-uuid', MOCK_CLAIM_ID, MOCK_CLAIMANT_PUBKEY);
   });
 
   it('blocks non-creator from approving', async () => {
@@ -1249,12 +1286,196 @@ describe('approveClaimCommand', () => {
     approveClaimCommand(bounties, mockEmitter);
     await capturedHandler!(createMockTestItem({ id: 'test-id' }));
 
-    expect(approveClaimApi).toHaveBeenCalledWith('bounty-uuid', MOCK_CLAIM_ID);
+    expect(approveClaimApi).toHaveBeenCalledWith('bounty-uuid', MOCK_CLAIM_ID, MOCK_CLAIMANT_PUBKEY);
     expect(bounties.get('test-id')!.claims[0].status).toBe('approved');
     expect(mockEmitter.fire).toHaveBeenCalled();
     expect(vscode.window.showInformationMessage).toHaveBeenCalledWith(
       'Claim approved – payout triggered!'
     );
+  });
+
+  // ── Claim hijack: several people can claim the same bounty ──────────────
+  //
+  // Claims are open by design, and the creator identifies their contributor
+  // out-of-band. Auto-selecting a claim for them is what let an attacker file
+  // a late claim and receive the payout — so when there's more than one, the
+  // creator names the recipient.
+  describe('multiple open claims', () => {
+    const twoClaims = () => [
+      {
+        id: MOCK_OTHER_CLAIM_ID,
+        claimantLnurl: null,
+        claimantPubkey: MOCK_ATTACKER_PUBKEY,
+        claimedAt: new Date().toISOString(),
+        status: 'pending',
+        lnurlHidden: true,
+      },
+      {
+        id: MOCK_CLAIM_ID,
+        claimantLnurl: 'lightning@example.com',
+        claimantPubkey: MOCK_CLAIMANT_PUBKEY,
+        claimedAt: new Date().toISOString(),
+        status: 'pending',
+        lnurlHidden: false,
+      },
+    ];
+
+    const bountyWithPendingClaim = () => {
+      const bounties = new Map<string, BountyInfo>();
+      bounties.set('test-id', {
+        id: 'bounty-uuid',
+        amountSats: 10000,
+        testId: 'test-id',
+        creatorId: 'creator-pubkey',
+        claims: [{ status: 'pending' as ClaimStatus }],
+      } as BountyInfo);
+      return bounties;
+    };
+
+    beforeEach(() => {
+      (getNostrUserPubkey as jest.Mock).mockResolvedValue('creator-pubkey');
+      (getPendingClaimsApi as jest.Mock).mockResolvedValue(twoClaims());
+      (vscode.window.showWarningMessage as jest.Mock).mockResolvedValue('Yes, Approve Payout');
+      (approveClaimApi as jest.Mock).mockResolvedValue({
+        id: 'bounty-uuid',
+        claims: [{ status: 'approved' }],
+      });
+    });
+
+    it('makes the creator choose the recipient instead of picking the newest', async () => {
+      // The newest claim is the attacker's; picking it silently is the bug.
+      (vscode.window.showQuickPick as jest.Mock).mockImplementation(async (items: any[]) => {
+        return items.find((i) => i.claim.id === MOCK_CLAIM_ID);
+      });
+
+      approveClaimCommand(bountyWithPendingClaim(), { fire: jest.fn() } as any);
+      await capturedHandler!(createMockTestItem({ id: 'test-id' }));
+
+      expect(vscode.window.showQuickPick).toHaveBeenCalled();
+      expect(approveClaimApi).toHaveBeenCalledWith(
+        'bounty-uuid',
+        MOCK_CLAIM_ID,
+        MOCK_CLAIMANT_PUBKEY
+      );
+    });
+
+    it('offers every claimant, identified by pubkey even when the address is hidden', async () => {
+      (vscode.window.showQuickPick as jest.Mock).mockResolvedValue(undefined);
+
+      approveClaimCommand(bountyWithPendingClaim(), { fire: jest.fn() } as any);
+      await capturedHandler!(createMockTestItem({ id: 'test-id' }));
+
+      const items = (vscode.window.showQuickPick as jest.Mock).mock.calls[0][0];
+      expect(items).toHaveLength(2);
+      // The hidden-address claim is still attributable to its claimant.
+      const hidden = items.find((i: any) => i.claim.id === MOCK_OTHER_CLAIM_ID);
+      expect(hidden.label).toContain(MOCK_ATTACKER_PUBKEY.slice(0, 16));
+      expect(hidden.detail).toMatch(/hidden by the claimant/);
+    });
+
+    it('approves nothing when the creator dismisses the chooser', async () => {
+      (vscode.window.showQuickPick as jest.Mock).mockResolvedValue(undefined);
+
+      approveClaimCommand(bountyWithPendingClaim(), { fire: jest.fn() } as any);
+      await capturedHandler!(createMockTestItem({ id: 'test-id' }));
+
+      expect(approveClaimApi).not.toHaveBeenCalled();
+      expect(vscode.window.showWarningMessage).not.toHaveBeenCalled();
+    });
+
+    it('ranks the claim with commits in the creator\'s branch above the unbacked one', async () => {
+      // The attacker's claim is newest, so the old code paid it. Now the claim
+      // whose commits the creator can actually see sorts first — a default
+      // highlight, not a gate.
+      const { verifyClaimTrailer } = require('../git/claim-trailer');
+      // Trailers are derived per bounty, so lookup takes (bountyId, pubkey).
+      (verifyClaimTrailer as jest.Mock).mockImplementation((_bountyId: string, pubkey: string) =>
+        pubkey === MOCK_CLAIMANT_PUBKEY
+          ? {
+              evidence: 'in-history',
+              currentBranch: 'feature/checkout',
+              commits: [
+                { sha: 'abc12345', subject: 'fix refund path', refs: ['feature/checkout'], inHistory: true },
+              ],
+            }
+          : { evidence: 'absent', commits: [] }
+      );
+      (vscode.window.showQuickPick as jest.Mock).mockResolvedValue(undefined);
+
+      approveClaimCommand(bountyWithPendingClaim(), { fire: jest.fn() } as any);
+      await capturedHandler!(createMockTestItem({ id: 'test-id' }));
+
+      const items = (vscode.window.showQuickPick as jest.Mock).mock.calls[0][0];
+      expect(items[0].claim.id).toBe(MOCK_CLAIM_ID);
+      // Location, phrased as a fact — no PR vocabulary, no grade.
+      expect(items[0].description).toContain('in your current branch (feature/checkout)');
+      expect(items[0].detail).toContain('fix refund path');
+      expect(items[1].description).toContain('no commit found');
+    });
+
+    it('never blocks approval on where the commits happen to live', async () => {
+      // A team sharing a branch, or a maintainer approving a PR before merging,
+      // must not be nagged. Evidence is shown; the decision stays the creator's.
+      const { verifyClaimTrailer } = require('../git/claim-trailer');
+      (verifyClaimTrailer as jest.Mock).mockReturnValue({
+        evidence: 'elsewhere',
+        currentBranch: 'main',
+        commits: [
+          { sha: 'def67890', subject: 'fix refund path', refs: ['origin/pr-99'], inHistory: false },
+        ],
+      });
+      (vscode.window.showQuickPick as jest.Mock).mockImplementation(
+        async (items: any[]) => items[0]
+      );
+
+      approveClaimCommand(bountyWithPendingClaim(), { fire: jest.fn() } as any);
+      await capturedHandler!(createMockTestItem({ id: 'test-id' }));
+
+      // Straight to the single confirm dialog — no extra warning modal in between.
+      expect(vscode.window.showWarningMessage).toHaveBeenCalledTimes(1);
+      const [, opts] = (vscode.window.showWarningMessage as jest.Mock).mock.calls[0];
+      expect(opts.detail).toContain('origin/pr-99');
+      expect(opts.detail).toContain('fix refund path');
+      expect(approveClaimApi).toHaveBeenCalled();
+    });
+
+    it('offers to fetch when no claim has commits on this machine yet', async () => {
+      // The normal state when reviewing a PR you haven't fetched. Go get the
+      // commits rather than telling the creator their process is wrong.
+      const { verifyClaimTrailer, fetchAllRemotes } = require('../git/claim-trailer');
+      (verifyClaimTrailer as jest.Mock).mockReturnValue({ evidence: 'absent', commits: [] });
+      (vscode.window.showInformationMessage as jest.Mock).mockResolvedValue('Fetch and re-check');
+      (vscode.window.showQuickPick as jest.Mock).mockImplementation(
+        async (items: any[]) => items[0]
+      );
+
+      approveClaimCommand(bountyWithPendingClaim(), { fire: jest.fn() } as any);
+      await capturedHandler!(createMockTestItem({ id: 'test-id' }));
+
+      expect(vscode.window.showInformationMessage).toHaveBeenCalledWith(
+        expect.stringContaining('Fetch from your remotes'),
+        'Fetch and re-check',
+        'Continue anyway'
+      );
+      expect(fetchAllRemotes).toHaveBeenCalled();
+      // And the approval still proceeds — fetching is help, not a gate.
+      expect(approveClaimApi).toHaveBeenCalled();
+    });
+
+    it('does not pay when the backend reports the claimant changed', async () => {
+      (vscode.window.showQuickPick as jest.Mock).mockImplementation(async (items: any[]) => items[1]);
+      (approveClaimApi as jest.Mock).mockResolvedValue('claimant-changed');
+      const bounties = bountyWithPendingClaim();
+
+      approveClaimCommand(bounties, { fire: jest.fn() } as any);
+      await capturedHandler!(createMockTestItem({ id: 'test-id' }));
+
+      // Never reported as a success, and the local cache is not flipped.
+      expect(vscode.window.showInformationMessage).not.toHaveBeenCalledWith(
+        'Claim approved – payout triggered!'
+      );
+      expect(bounties.get('test-id')!.claims[0].status).toBe('pending');
+    });
   });
 
   it('shows a benign success (never a failure) when the backend says already-approved', async () => {
@@ -1350,13 +1571,16 @@ describe('approveClaimCommand', () => {
   it('approves a private claim without ever showing the hidden address', async () => {
     (getNostrUserPubkey as jest.Mock).mockResolvedValue('creator-pubkey');
     // Backend redacted the destination for a private claim: no LNURL, flagged hidden.
-    (getPendingClaimApi as jest.Mock).mockResolvedValue({
-      id: MOCK_CLAIM_ID,
-      claimantLnurl: null,
-      claimedAt: new Date().toISOString(),
-      status: 'pending',
-      lnurlHidden: true,
-    });
+    (getPendingClaimsApi as jest.Mock).mockResolvedValue([
+      {
+        id: MOCK_CLAIM_ID,
+        claimantLnurl: null,
+        claimantPubkey: MOCK_CLAIMANT_PUBKEY,
+        claimedAt: new Date().toISOString(),
+        status: 'pending',
+        lnurlHidden: true,
+      },
+    ]);
 
     const bounties = new Map<string, BountyInfo>();
     bounties.set('test-id', {
@@ -1383,7 +1607,7 @@ describe('approveClaimCommand', () => {
     expect(message).toContain('the claimant');
     expect(`${message} ${options?.detail ?? ''}`).not.toContain('@');
     // Approval still binds to the reviewed claim id and goes through.
-    expect(approveClaimApi).toHaveBeenCalledWith('bounty-uuid', MOCK_CLAIM_ID);
+    expect(approveClaimApi).toHaveBeenCalledWith('bounty-uuid', MOCK_CLAIM_ID, MOCK_CLAIMANT_PUBKEY);
     expect(bounties.get('test-id')!.claims[0].status).toBe('approved');
   });
 
@@ -1475,7 +1699,7 @@ describe('approveClaimCommand', () => {
     await capturedHandler!(createMockTestItem({ id: 'test-id' }));
 
     expect(vscode.commands.executeCommand).toHaveBeenCalledWith('sattest.connectWallet');
-    expect(approveClaimApi).toHaveBeenCalledWith('bounty-uuid', MOCK_CLAIM_ID);
+    expect(approveClaimApi).toHaveBeenCalledWith('bounty-uuid', MOCK_CLAIM_ID, MOCK_CLAIMANT_PUBKEY);
     expect(vscode.window.showInformationMessage).toHaveBeenCalledWith(
       'Claim approved – payout triggered!'
     );

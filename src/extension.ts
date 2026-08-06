@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import {
   addBountyCommand,
+  addClaimTrailerCommand,
   approveClaimCommand,
   checkPaidCommand,
   claimBountyCommand,
@@ -67,7 +68,8 @@ export async function activate(context: vscode.ExtensionContext) {
     removeBountyCommand(bounties, onBountiesChangedEmitter, context),
     checkPaidCommand(bounties, onBountiesChangedEmitter, context),
     claimBountyCommand(bounties, onBountiesChangedEmitter),
-    approveClaimCommand(bounties, onBountiesChangedEmitter)
+    approveClaimCommand(bounties, onBountiesChangedEmitter),
+    addClaimTrailerCommand(bounties)
   );
 
   context.subscriptions.push(

@@ -19,9 +19,10 @@ import {
   claimBountyWithLnAddress,
   createBounty,
   deactivateBounty,
-  getPendingClaim,
+  getPendingClaims,
   setBountyCreator,
   updatePaidStatus,
+  type PendingClaim,
 } from '../api/bounty.api.js';
 import { connectNostr } from '../api/nostr.api.js';
 import {
@@ -33,6 +34,19 @@ import {
 import { configureLnbits, getLnbitsConfig } from '../api/lnbits.api.js';
 import { promptForLnurl } from './lnurl-input.js';
 import { getNwcStatus } from '../api/nwc.api.js';
+import {
+  CLAIM_TRAILER_KEY,
+  addClaimTrailerToHead,
+  claimTrailerToken,
+  fetchAllRemotes,
+  hasCommits,
+  hasRemotes,
+  headHasClaimTrailer,
+  readCommitPatches,
+  verifyClaimTrailer,
+  type ClaimEvidence,
+  type ClaimEvidenceResult,
+} from '../git/claim-trailer.js';
 
 function escapeHtml(s: string): string {
   return s
@@ -250,11 +264,18 @@ export const addBountyCommand = (
           await setIsDefaultLnbits((!userLnbitsConfig).toString());
         }
       }
-      // Scope the bounty to the workspace's git repo when possible so it
-      // shows up in unauthenticated `GET /bounties?repo=...` / filter calls
-      // for everyone else working in the same repo. Undefined when the
-      // workspace has no configured git remote — backend stores null.
+      // Scope the bounty to the workspace's git repo. Listing is repo-scoped
+      // and a bounty with no repo can never appear in it again — so refuse to
+      // create one rather than minting a row that's only reachable by SQL.
+      // (Bounties created before this rule are in exactly that position.)
       const repoSlug = getRepoSlug();
+      if (!repoSlug) {
+        vscode.window.showErrorMessage(
+          'Sattest needs a git repository with an "origin" remote to create a bounty — ' +
+            'bounties are scoped per repo so contributors working in the same repo can find them.'
+        );
+        return;
+      }
 
       const newBountyFromBackend = await createBounty(
         amountSats,
@@ -498,6 +519,219 @@ export const checkPaidCommand = (
     }
   });
 
+/** Codicon hinting where a claimant's commits sit. Not a pass/fail mark. */
+function evidenceIcon(e: ClaimEvidence): string {
+  switch (e) {
+    case 'in-history':
+      return '$(git-commit)';
+    case 'elsewhere':
+      return '$(git-branch)';
+    default:
+      return '$(question)';
+  }
+}
+
+/**
+ * Where this claimant's commits live, in one line.
+ *
+ * Phrased as location rather than judgement: a team sharing a feature branch
+ * never "merges" anything, and a maintainer reviewing a fetched PR hasn't
+ * merged it *yet*. Both are ordinary, so neither gets scolded.
+ */
+function evidenceLabel(result: ClaimEvidenceResult): string {
+  switch (result.evidence) {
+    case 'in-history':
+      return result.currentBranch
+        ? `in your current branch (${result.currentBranch})`
+        : 'in your current branch';
+    case 'elsewhere': {
+      // Prefer the remote-tracking refs — "origin/pr-99" tells the creator far
+      // more than a local branch name they may not recognise.
+      const refs = result.commits.flatMap((c) => c.refs);
+      const shown = Array.from(new Set(refs)).slice(0, 2);
+      return shown.length > 0 ? `on ${shown.join(', ')}` : 'in this repo, not on your branch';
+    }
+    case 'absent':
+      return 'no commit found in this repo';
+    case 'unknown':
+      return 'could not check this repo';
+  }
+}
+
+/** The commit a creator would actually look at, rendered for a dialog line. */
+function describeTopCommit(result: ClaimEvidenceResult): string | undefined {
+  const top = result.commits[0];
+  if (!top) {
+    return undefined;
+  }
+  return `"${top.subject}" (${top.sha.slice(0, 8)})`;
+}
+
+/**
+ * Open the claimant's commits as a patch, so the creator can read what they're
+ * paying for instead of trusting a commit subject.
+ *
+ * Rendered into an untitled `diff` document rather than through the built-in
+ * git extension's diff provider: this needs no extra dependency, works for
+ * commits on any ref (including ones not checked out), and shows all of the
+ * claimant's commits in one scrollable view. Never throws — failing to open a
+ * review must not derail an approval the creator can still make.
+ */
+async function showClaimDiff(
+  result: ClaimEvidenceResult,
+  claimantPubkey: string | null
+): Promise<void> {
+  try {
+    const patch = await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: 'Sattest: loading changes…' },
+      async () => readCommitPatches(result.commits.map((c) => c.sha))
+    );
+    if (!patch.trim()) {
+      vscode.window.showInformationMessage('No changes to show for this claim.');
+      return;
+    }
+    const header =
+      `# Sattest — changes claimed by ${claimantPubkey ?? 'unknown claimant'}\n` +
+      `# ${result.commits.length} commit(s), ${evidenceLabel(result)}\n` +
+      '# Review only — editing this buffer changes nothing.\n\n';
+    const doc = await vscode.workspace.openTextDocument({
+      content: header + patch,
+      language: 'diff',
+    });
+    await vscode.window.showTextDocument(doc, { preview: true, preserveFocus: false });
+  } catch (err) {
+    console.error('[showClaimDiff] failed:', err);
+    vscode.window.showWarningMessage(
+      `Couldn't load the claimant's changes: ${err instanceof Error ? err.message : 'Unknown error'}`
+    );
+  }
+}
+
+/** The "Backed by:" line in the approve confirmation. */
+function evidenceDetailLine(result: ClaimEvidenceResult): string {
+  const commit = describeTopCommit(result);
+  const where = evidenceLabel(result);
+  if (!commit) {
+    return `Backed by: ${where}`;
+  }
+  const more = result.commits.length > 1 ? ` +${result.commits.length - 1} more` : '';
+  return `Backed by: ${commit}${more} — ${where}`;
+}
+
+/**
+ * Offer to stamp the claimant's Nostr pubkey into their latest commit.
+ *
+ * This is what turns a claim from an assertion into something the creator can
+ * verify: the pubkey travels inside a commit, and a commit only reaches the
+ * creator's history if they merge it. Amending rewrites HEAD, so it is always
+ * opt-in and the prompt says so.
+ *
+ * Never throws — a claim that succeeded must not be reported as failed just
+ * because the trailer step didn't work out.
+ */
+export async function offerClaimTrailer(bountyId: string): Promise<void> {
+  try {
+    const pubkey = await getNostrUserPubkey();
+    if (!pubkey) {
+      return;
+    }
+    if (!hasCommits()) {
+      vscode.window.showInformationMessage(
+        `Add "${CLAIM_TRAILER_KEY}: ${claimTrailerToken(bountyId, pubkey)}" to the commit with ` +
+          'your fix — it\'s how the bounty creator verifies the claim is yours. Or run ' +
+          '"Sattest: Add Claim Trailer to Latest Commit" once you\'ve committed.'
+      );
+      return;
+    }
+    if (headHasClaimTrailer(bountyId, pubkey)) {
+      return; // already stamped — nothing to do
+    }
+
+    const choice = await vscode.window.showInformationMessage(
+      'Tag your latest commit as this claim? This adds your Nostr pubkey to the commit ' +
+        'message so the bounty creator can verify the work is yours.',
+      { modal: false },
+      'Tag latest commit',
+      'Not now'
+    );
+    if (choice !== 'Tag latest commit') {
+      return;
+    }
+    await runAddClaimTrailer(bountyId, pubkey);
+  } catch (err) {
+    console.error('[offerClaimTrailer] skipped:', err);
+  }
+}
+
+/** Amend HEAD with the claim trailer and report the outcome. Never throws. */
+async function runAddClaimTrailer(bountyId: string, pubkey: string): Promise<void> {
+  try {
+    const sha = addClaimTrailerToHead(bountyId, pubkey);
+    vscode.window.showInformationMessage(
+      `Commit ${sha.slice(0, 8)} tagged with your claim. Push it (force-push if you'd ` +
+        'already pushed this commit) so the creator can verify it.'
+    );
+  } catch (err) {
+    vscode.window.showErrorMessage(
+      `Couldn't tag the commit: ${err instanceof Error ? err.message : 'Unknown error'}. ` +
+        `You can add "${CLAIM_TRAILER_KEY}: ${claimTrailerToken(bountyId, pubkey)}" to the ` +
+        'commit message by hand.'
+    );
+  }
+}
+
+/**
+ * `sattest.addClaimTrailer` — standalone entry point for the same operation,
+ * so a claimant who dismissed the prompt (or committed after claiming) can
+ * still tag their work without re-filing the claim.
+ *
+ * The trailer is derived per bounty, so this has to ask which one. The
+ * claimant knows; the extension can't infer it, because the public listing
+ * deliberately doesn't say who filed which claim.
+ */
+export const addClaimTrailerCommand = (bounties: Map<string, BountyInfo>) =>
+  vscode.commands.registerCommand('sattest.addClaimTrailer', async (test?: vscode.TestItem) => {
+    const pubkey = await getNostrUserPubkey();
+    if (!pubkey) {
+      vscode.window.showErrorMessage(
+        'Connect Nostr first (Ctrl+Alt+N) — the trailer records which identity is claiming.'
+      );
+      return;
+    }
+    if (!hasCommits()) {
+      vscode.window.showErrorMessage('No commit to tag yet — commit your fix first.');
+      return;
+    }
+
+    // Invoked from a test's context menu, we already know the bounty.
+    let bounty = test?.id ? bounties.get(test.id.trim()) : undefined;
+    if (!bounty) {
+      const candidates = Array.from(bounties.values()).filter((b) => b.active);
+      if (candidates.length === 0) {
+        vscode.window.showErrorMessage('No active bounties in this workspace to tag a claim for.');
+        return;
+      }
+      const picked = await vscode.window.showQuickPick(
+        candidates.map((b) => ({
+          label: b.testItem?.label ?? b.testId,
+          description: `${b.amountSats} sats`,
+          bounty: b,
+        })),
+        { title: 'Which bounty are you claiming?', ignoreFocusOut: true }
+      );
+      if (!picked) {
+        return;
+      }
+      bounty = picked.bounty;
+    }
+
+    if (headHasClaimTrailer(bounty.id, pubkey)) {
+      vscode.window.showInformationMessage('Your latest commit is already tagged with this claim.');
+      return;
+    }
+    await runAddClaimTrailer(bounty.id, pubkey);
+  });
+
 export const claimBountyCommand = (
   bounties: Map<string, BountyInfo>,
   onBountiesChangedEmitter: vscode.EventEmitter<void>
@@ -570,6 +804,11 @@ export const claimBountyCommand = (
         vscode.window.showInformationMessage(
           `Claim request sent for ${bounty.amountSats} sats. Waiting for creator approval.`
         );
+        // Offer the trailer immediately — this is the moment the claimant has
+        // the context. Without a commit carrying their pubkey, the creator has
+        // no way to tell this claim from anyone else's, and it shows up in
+        // their approve list as unverified.
+        await offerClaimTrailer(bounty.id);
       }
     } catch (error) {
       console.error('[claimBounty] Error claiming bounty:', error);
@@ -618,20 +857,117 @@ export const approveClaimCommand = (
       return;
     }
 
-    // Fetch the current pending claim from the backend before showing the
-    // confirmation dialog. This serves two purposes:
-    //   1. Transparency — the creator sees exactly which LNURL will receive
-    //      funds, making a front-running attack visible instead of silent.
-    //   2. Claim binding — we pass `claimId` to the approve endpoint so the
-    //      backend rejects any claim that isn't the one the creator reviewed,
-    //      even if an attacker submitted a newer one in the interim.
-    const pendingClaim = await getPendingClaim(bounty.id);
-    if (!pendingClaim) {
+    // Fetch the open claims from the backend before showing the confirmation
+    // dialog. This serves three purposes:
+    //   1. Transparency — the creator sees who is being paid, and (unless the
+    //      claimant hid it) which LNURL receives the funds.
+    //   2. Choice — claims are open to anyone, so a bounty can have several.
+    //      The creator identifies their contributor out-of-band, so only they
+    //      can say which claim is the right one. Picking "the newest" for them
+    //      is what let an attacker file a late claim and be paid instead.
+    //   3. Claim binding — we pass both `claimId` and `claimantPubkey` to the
+    //      approve endpoint, so a claim substituted in the interim is rejected
+    //      rather than silently paid.
+    const pendingClaims = await getPendingClaims(bounty.id);
+    if (pendingClaims.length === 0) {
       vscode.window.showErrorMessage(
         'Could not retrieve claim details — the claim may have already been approved or removed.'
       );
       return;
     }
+
+    // Look up each claimant's trailer commits in local git. This is evidence
+    // for the creator to read, not a verdict: teams differ, and "in your
+    // branch" is the same answer whether they merged a fork's PR or simply
+    // share a feature branch with the claimant.
+    const evidenceFor = (claim: PendingClaim): ClaimEvidenceResult =>
+      claim.claimantPubkey
+        ? verifyClaimTrailer(bounty.id, claim.claimantPubkey)
+        : { evidence: 'unknown', commits: [] };
+
+    let scored = pendingClaims.map((claim) => ({ claim, result: evidenceFor(claim) }));
+
+    // Commits already in the creator's branch sort first — a helpful default
+    // highlight, not a gate. Nothing below refuses to pay on this ordering.
+    const rank: Record<ClaimEvidence, number> = {
+      'in-history': 0,
+      elsewhere: 1,
+      absent: 2,
+      unknown: 3,
+    };
+    const byEvidence = (
+      a: { result: ClaimEvidenceResult },
+      b: { result: ClaimEvidenceResult }
+    ) => rank[a.result.evidence] - rank[b.result.evidence];
+    scored.sort(byEvidence);
+
+    // Nothing found anywhere, but there are remotes to ask — the commits may
+    // simply not have arrived on this machine yet, which is the normal state
+    // when reviewing a PR you haven't fetched. Offer to go get them rather
+    // than telling the creator their workflow is wrong.
+    if (scored.every((s) => s.result.evidence === 'absent') && hasRemotes()) {
+      const choice = await vscode.window.showInformationMessage(
+        'No commit in this repo carries this claimant\'s key yet. Fetch from your remotes and re-check?',
+        'Fetch and re-check',
+        'Continue anyway'
+      );
+      if (choice === 'Fetch and re-check') {
+        const fetched = await vscode.window.withProgress(
+          { location: vscode.ProgressLocation.Notification, title: 'Sattest: fetching…' },
+          async () => fetchAllRemotes()
+        );
+        if (fetched) {
+          scored = pendingClaims.map((claim) => ({ claim, result: evidenceFor(claim) }));
+          scored.sort(byEvidence);
+        }
+      } else if (choice !== 'Continue anyway') {
+        return; // dismissed → approve nothing
+      }
+    }
+
+    let chosen = scored[0];
+    if (scored.length > 1) {
+      // More than one person has claimed this bounty. Never guess — make the
+      // creator name the recipient. The pubkey is the stable identifier here;
+      // the LNURL may be hidden, and is attacker-chosen either way.
+      const picked = await vscode.window.showQuickPick(
+        scored.map((s) => ({
+          label: s.claim.claimantPubkey
+            ? `${evidenceIcon(s.result.evidence)} ${s.claim.claimantPubkey.slice(0, 16)}…${s.claim.claimantPubkey.slice(-8)}`
+            : '$(question) Unknown claimant (legacy claim)',
+          description: [
+            evidenceLabel(s.result),
+            s.claim.status === claimStatusApproving ? 'payout processing' : '',
+          ]
+            .filter(Boolean)
+            .join(' · '),
+          detail: [
+            describeTopCommit(s.result),
+            // Say so explicitly when the address is hidden — silence would read
+            // as "no address", and the creator should know the difference.
+            s.claim.lnurlHidden
+              ? 'address hidden by the claimant'
+              : `pays ${s.claim.claimantLnurl ?? 'unknown'}`,
+          ]
+            .filter(Boolean)
+            .join(' · '),
+          // `claim` is the selection; `entry` carries the evidence alongside it
+          // so the confirm dialog can show the commit without re-running git.
+          claim: s.claim,
+          entry: s,
+        })),
+        {
+          title: `${scored.length} people have claimed this bounty — who are you paying?`,
+          placeHolder: 'Match the commit against the work you reviewed',
+          ignoreFocusOut: true,
+        }
+      );
+      if (!picked) {
+        return; // dismissed → approve nothing
+      }
+      chosen = picked.entry;
+    }
+    const pendingClaim = chosen.claim;
 
     // Build the destination line for the confirmation dialog. When the claimant
     // opted into privacy, the backend redacts the address (`claimantLnurl` is
@@ -657,26 +993,58 @@ export const approveClaimCommand = (
     // than showing a "Send N sats" modal that misrepresents what the click does.
     const isRecheck = pendingClaim.status === claimStatusApproving;
 
-    const confirmed = isRecheck
-      ? await vscode.window.showWarningMessage(
-          `Re-check this ${bounty.amountSats} sat payout with your wallet?`,
+    let confirmed: string | undefined;
+    if (isRecheck) {
+      confirmed = await vscode.window.showWarningMessage(
+        `Re-check this ${bounty.amountSats} sat payout with your wallet?`,
+        {
+          modal: true,
+          detail:
+            'Sattest couldn\'t confirm the last attempt. It will ask your wallet ' +
+            'whether the payment went through, and only send again if your wallet ' +
+            'confirms it did not.',
+        },
+        'Re-check Payout'
+      );
+    } else {
+      // Loop so "Review changes" opens the patch and returns to the same
+      // decision, rather than dropping the creator out of the flow. Reviewing
+      // the code is the whole point of the trailer binding — the dialog is
+      // where that decision is made, so the diff belongs one click away from it.
+      const canReview = chosen.result.commits.length > 0;
+      for (;;) {
+        // Modal dialogs render VS Code's own Cancel button — passing an
+        // explicit 'Cancel' item here used to show two of them. Dismissal
+        // resolves to undefined, which the guard below treats as "don't approve".
+        const actions = canReview
+          ? ['Yes, Approve Payout', 'Review changes']
+          : ['Yes, Approve Payout'];
+        confirmed = await vscode.window.showWarningMessage(
+          `Send ${bounty.amountSats} sats to:\n${destinationLine}`,
           {
             modal: true,
+            // The claimant pubkey is always shown, even when the payout address
+            // is hidden. Hiding an *address* is a supported privacy choice;
+            // hiding *who is being paid* from the payer left the creator with
+            // nothing to check, which is what made a substituted claim
+            // invisible at exactly the moment it mattered.
+            //
+            // The commit line goes here rather than behind a warning modal:
+            // this is the moment the creator decides, and a commit subject they
+            // recognise is worth more than any grade we could compute.
             detail:
-              'Sattest couldn\'t confirm the last attempt. It will ask your wallet ' +
-              'whether the payment went through, and only send again if your wallet ' +
-              'confirms it did not.',
+              `Bounty: "${test?.label}"\n` +
+              `Claimant: ${pendingClaim.claimantPubkey ?? 'unknown (legacy claim)'}\n` +
+              evidenceDetailLine(chosen.result),
           },
-          'Re-check Payout'
-        )
-      : // Modal dialogs render VS Code's own Cancel button — passing an explicit
-        // 'Cancel' item here used to show two of them. Dismissal resolves to
-        // undefined, which the guard below already treats as "don't approve".
-        await vscode.window.showWarningMessage(
-          `Send ${bounty.amountSats} sats to:\n${destinationLine}`,
-          { modal: true, detail: `Bounty: "${test?.label}"` },
-          'Yes, Approve Payout'
+          ...actions
         );
+        if (confirmed !== 'Review changes') {
+          break;
+        }
+        await showClaimDiff(chosen.result, pendingClaim.claimantPubkey);
+      }
+    }
 
     if (confirmed !== (isRecheck ? 'Re-check Payout' : 'Yes, Approve Payout')) {
       return;
@@ -713,7 +1081,18 @@ export const approveClaimCommand = (
 
     inFlight.add(bounty.id);
     try {
-      const result = await approveClaim(bounty.id, pendingClaim.id);
+      const result = await approveClaim(
+        bounty.id,
+        pendingClaim.id,
+        pendingClaim.claimantPubkey
+      );
+      if (result === 'claimant-changed') {
+        // The backend refused because the open-claim set changed under us (a
+        // new claim landed, or this one isn't the claimant we named). The user
+        // has already seen the reason; re-open the picker rather than paying.
+        onBountiesChangedEmitter.fire();
+        return;
+      }
       if (!result) {
         // approveClaim() handles its own error toast (e.g. the backend's 502
         // with the real NWC failure reason) and returns null. Bail here so we
