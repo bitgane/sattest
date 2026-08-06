@@ -73,6 +73,11 @@
         "category": "Sattest Claim"
       },
       {
+        "command": "sattest.addClaimTrailer",
+        "title": "Add Claim Trailer to Latest Commit",
+        "category": "Sattest Claim"
+      },
+      {
         "command": "sattest.removeBounty",
         "title": "Remove Bounty",
         "category": "Sattest Bounty"
