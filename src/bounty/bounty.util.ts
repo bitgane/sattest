@@ -1,5 +1,4 @@
 import * as vscode from 'vscode';
-import { toString } from 'qrcode';
 import {
   BountyInfo,
   claimStatusApproved,
@@ -12,7 +11,14 @@ import {
   removeParentLabelFromTestId,
 } from '../test/test-item.util.js';
 import { CustomTestItem } from '../test/test-item-wrapper.js';
-import * as crypto from 'crypto';
+import { showBountyInvoicePanel } from './invoice-webview.js';
+import {
+  evidenceIcon,
+  evidenceLabel,
+  describeTopCommit,
+  showClaimDiff,
+  evidenceDetailLine,
+} from './claim-evidence.js';
 import {
   approveClaim,
   checkPaidStatus,
@@ -26,7 +32,6 @@ import type { PendingClaim } from '../api/bounty.api.js';
 import { connectNostr } from '../api/nostr.api.js';
 import {
   getIsDefaultLnbits,
-  getNostrUserHandle,
   getNostrUserPubkey,
   setIsDefaultLnbits,
 } from '../state.js';
@@ -41,24 +46,10 @@ import {
   hasCommits,
   hasRemotes,
   headHasClaimTrailer,
-  readCommitPatches,
   verifyClaimTrailer,
   type ClaimEvidence,
   type ClaimEvidenceResult,
 } from '../git/claim-trailer.js';
-
-function escapeHtml(s: string): string {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
-
-function getNonce(): string {
-  return crypto.randomBytes(16).toString('base64');
-}
 
 // Custodial (LNbits invoice/QR) bounties are disabled — NWC (non-custodial) is
 // the only funding path
@@ -320,7 +311,7 @@ export const addBountyCommand = (
         );
       } else {
         // Custodial path: show QR + poll for payment as today.
-        await showBountyInvoicePlanel(test, fullBounty, bounties, context, onBountiesChangedEmitter);
+        await showBountyInvoicePanel(test, fullBounty, bounties, context, onBountiesChangedEmitter);
         vscode.window.showInformationMessage(
           `✅ Bounty created: ${amountSats} sats for "${test.label}". QR panel opened. Fund it!`
         );
@@ -494,7 +485,7 @@ export const checkPaidCommand = (
         vscode.window.showInformationMessage(`Bounty funded! ${bounty.amountSats} sats in bounty.`);
       } else {
         // QR/webview to fund the bounty
-        await showBountyInvoicePlanel(test, bounty, bounties, context, onBountiesChangedEmitter);
+        await showBountyInvoicePanel(test, bounty, bounties, context, onBountiesChangedEmitter);
         vscode.window.showInformationMessage(
           `Bounty not yet funded for ${test.label}. QR panel opened. Fund it!`
         );
@@ -503,105 +494,6 @@ export const checkPaidCommand = (
       vscode.window.showErrorMessage(`Error checking payment: ${err}`);
     }
   });
-
-/** Codicon hinting where a claimant's commits sit. Not a pass/fail mark. */
-function evidenceIcon(e: ClaimEvidence): string {
-  switch (e) {
-    case 'in-history':
-      return '$(git-commit)';
-    case 'elsewhere':
-      return '$(git-branch)';
-    default:
-      return '$(question)';
-  }
-}
-
-/**
- * Where this claimant's commits live, in one line.
- *
- * Phrased as location rather than judgement: a team sharing a feature branch
- * never "merges" anything, and a maintainer reviewing a fetched PR hasn't
- * merged it *yet*. Both are ordinary, so neither gets scolded.
- */
-function evidenceLabel(result: ClaimEvidenceResult): string {
-  switch (result.evidence) {
-    case 'in-history':
-      return result.currentBranch
-        ? `in your current branch (${result.currentBranch})`
-        : 'in your current branch';
-    case 'elsewhere': {
-      // Prefer the remote-tracking refs — "origin/pr-99" tells the creator far
-      // more than a local branch name they may not recognise.
-      const refs = result.commits.flatMap((c) => c.refs);
-      const shown = Array.from(new Set(refs)).slice(0, 2);
-      return shown.length > 0 ? `on ${shown.join(', ')}` : 'in this repo, not on your branch';
-    }
-    case 'absent':
-      return 'no commit found in this repo';
-    case 'unknown':
-      return 'could not check this repo';
-  }
-}
-
-/** The commit a creator would actually look at, rendered for a dialog line. */
-function describeTopCommit(result: ClaimEvidenceResult): string | undefined {
-  const top = result.commits[0];
-  if (!top) {
-    return undefined;
-  }
-  return `"${top.subject}" (${top.sha.slice(0, 8)})`;
-}
-
-/**
- * Open the claimant's commits as a patch, so the creator can read what they're
- * paying for instead of trusting a commit subject.
- *
- * Rendered into an untitled `diff` document rather than through the built-in
- * git extension's diff provider: this needs no extra dependency, works for
- * commits on any ref (including ones not checked out), and shows all of the
- * claimant's commits in one scrollable view. Never throws — failing to open a
- * review must not derail an approval the creator can still make.
- */
-async function showClaimDiff(
-  result: ClaimEvidenceResult,
-  claimantPubkey: string | null
-): Promise<void> {
-  try {
-    const patch = await vscode.window.withProgress(
-      { location: vscode.ProgressLocation.Notification, title: 'Sattest: loading changes…' },
-      async () => readCommitPatches(result.commits.map((c) => c.sha))
-    );
-    if (!patch.trim()) {
-      vscode.window.showInformationMessage('No changes to show for this claim.');
-      return;
-    }
-    const header =
-      `# Sattest — changes claimed by ${claimantPubkey ?? 'unknown claimant'}\n` +
-      `# ${result.commits.length} commit(s), ${evidenceLabel(result)}\n` +
-      '# Review only — editing this buffer changes nothing.\n\n';
-    const doc = await vscode.workspace.openTextDocument({
-      content: header + patch,
-      language: 'diff',
-    });
-    await vscode.window.showTextDocument(doc, { preview: true, preserveFocus: false });
-  } catch (err) {
-    console.error('[showClaimDiff] failed:', err);
-    vscode.window.showWarningMessage(
-      `Couldn't load the claimant's changes: ${err instanceof Error ? err.message : 'Unknown error'}`
-    );
-  }
-}
-
-/** The "Backed by:" line in the approve confirmation. */
-function evidenceDetailLine(result: ClaimEvidenceResult): string {
-  const commit = describeTopCommit(result);
-  const where = evidenceLabel(result);
-  if (!commit) {
-    return `Backed by: ${where}`;
-  }
-  const more = result.commits.length > 1 ? ` +${result.commits.length - 1} more` : '';
-  return `Backed by: ${commit}${more} — ${where}`;
-}
 
 /**
  * Offer to stamp the claimant's Nostr pubkey into their latest commit.
@@ -1133,228 +1025,3 @@ export const approveClaimCommand = (
     }
   });
 };
-
-/**
- * Generates a QR code for the invoice and sets up the Webview panel HTML.
- * @param panel - The Webview panel to update
- * @param bounty - The bounty info containing invoice and amountSats
- */
-async function showBountyInvoicePlanel(
-  test: vscode.TestItem,
-  bounty: BountyInfo,
-  bounties: Map<string, BountyInfo>,
-  context: vscode.ExtensionContext,
-  onBountiesChangedEmitter: vscode.EventEmitter<void>
-): Promise<void> {
-  // NWC bounties have no invoice or payment hash — never open the QR panel
-  // for them. Callers are expected to short-circuit, but guard defensively.
-  if (!bounty.invoice || !bounty.paymentHash) {
-    console.warn(
-      '[showBountyInvoicePlanel] Skipping panel — bounty has no invoice/paymentHash',
-      bounty.id
-    );
-    return;
-  }
-  const invoice = bounty.invoice;
-  const panel = vscode.window.createWebviewPanel(
-    'bountyInvoice',
-    `Bounty: ${test.label} (${bounty.amountSats} sats)`,
-    vscode.ViewColumn.Beside,
-    { enableScripts: true, localResourceRoots: [], enableForms: false, enableCommandUris: false }
-  );
-  let noticeHtml = '';
-  try {
-    // Generate QR code as SVG
-    const invoiceQrSvg = await new Promise<string>((resolve, reject) => {
-      toString(
-        invoice,
-        { type: 'svg', errorCorrectionLevel: 'M' },
-        (err: Error | null | undefined, svg: string) => {
-          if (err) {
-            reject(err);
-            return;
-          }
-          resolve(svg);
-        }
-      );
-    });
-
-    const nostrHandle = await getNostrUserHandle();
-    const userPubkey = await getNostrUserPubkey();
-
-    if (nostrHandle) {
-      noticeHtml = `
-    <div class="success-notice">
-      Connected to Nostr as <strong>${escapeHtml(nostrHandle)}</strong>.<br>
-      Not you? Press <span class="shortcut">Ctrl+Alt+N</span> (Cmd+Alt+N on Mac) to create and review bounties under a different Nostr identity.
-    </div>
-  `;
-    } else if (!nostrHandle && userPubkey) {
-      const shortPubkey = userPubkey.slice(0, 10) + '...' + userPubkey.slice(-6);
-      noticeHtml = `
-        <div class="success-notice">
-          Connected to Nostr with pubkey <strong>${escapeHtml(shortPubkey)}</strong>.<br>
-          To disconnect or sign bounties under a different Nostr user, press <span class="shortcut">Ctrl+Alt+N</span> (Cmd+Alt+N on Mac).
-        </div>
-      `;
-    } else {
-      noticeHtml = `
-    <div class="info-notice">
-      This bounty is anonymous.<br>
-      <span class="shortcut">Connect to Nostr using keyboard shortcut Ctrl+Alt+N (Cmd+Alt+N on Mac)</span><br>
-      to review any claims.
-    </div>
-  `;
-    }
-
-    // Set Webview HTML
-    const nonce = getNonce();
-    panel.webview.html = `
-  <!DOCTYPE html>
-  <html lang="en">
-  <head>
-    <meta charset="UTF-8">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Bounty Invoice</title>
-    <style>
-      body {
-        font-family: monospace;
-        padding: 20px;
-        background: #f5f5f5;
-        color: #333;
-        margin: 0;
-      }
-      h2 {
-        text-align: center;
-        color: #2c3e50;
-      }
-      p {
-        text-align: center;
-      }
-      .qr-container {
-        text-align: center;
-        margin: 20px 0;
-      }
-      .qr-container svg {
-        max-width: 250px;
-        height: auto;
-      }
-      button {
-        display: block;
-        margin: 10px auto;
-        padding: 10px 20px;
-        background: #3498db;
-        color: white;
-        border: none;
-        border-radius: 4px;
-        cursor: pointer;
-      }
-      button:hover {
-        background: #2980b9;
-      }
-      .info-notice, .success-notice {
-        padding: 12px;
-        margin: 20px 0;
-        border-radius: 4px;
-        text-align: center;
-        line-height: 1.5;
-      }
-      .info-notice {
-        background: #e3f2fd;
-        border: 1px solid #bbdefb;
-        color: #0d47a1;
-      }
-      .success-notice {
-        background: #e8f5e9;
-        border: 1px solid #c8e6c9;
-        color: #1b5e20;
-      }
-      .shortcut {
-        font-weight: bold;
-        color: #1e88e5;
-      }
-      .status { text-align: center; font-weight: bold; margin-top: 20px; }
-    </style>
-  </head>
-  <body>
-    <h2>Scan to fund bounty (${bounty.amountSats} sats)</h2>
-    ${noticeHtml}
-    <div class="qr-container">
-      ${invoiceQrSvg}
-    </div>
-    <button id="copyBtn">
-      Copy Invoice
-    </button>
-    <p id="status" class="status">Waiting for payment via Lightning wallet...</p>
-    <script nonce="${nonce}">
-      const vscode = acquireVsCodeApi();
-      // JSON-encoded string literal (not HTML-escaped interpolation) so the
-      // invoice can't break out of the JS string context.
-      const invoice = ${JSON.stringify(invoice)};
-      document.getElementById('copyBtn').addEventListener('click', function() {
-        navigator.clipboard.writeText(invoice).then(function() { alert('Invoice copied!'); });
-      });
-      window.addEventListener('message', event => {
-        const msg = event.data;
-        if (msg.command === 'updateStatus') {
-          document.getElementById('status').innerText = msg.text;
-          document.getElementById('status').style.color = msg.color || '#333';
-        } else if (msg.command === 'paid') {
-          document.getElementById('status').innerText = 'Payment received! Closing...';
-          document.getElementById('status').style.color = 'green';
-          setTimeout(() => vscode.postMessage({command:'close'}), 3000);
-        }
-      });
-    </script>
-  </body>
-  </html>
-`;
-
-    // Listen for messages from Webview
-    const messageDisposable = panel.webview.onDidReceiveMessage((message) => {
-      if (message.command === 'close') {
-        panel.dispose();
-      }
-    });
-
-    // Clean up on panel close
-    panel.onDidDispose(() => messageDisposable.dispose());
-
-    // Start polling for payment status
-    const pollInterval = setInterval(async () => {
-      try {
-        const isPaid = await checkPaidStatus(bounty.paymentHash as string); // your existing check logic or helper
-
-        if (isPaid) {
-          clearInterval(pollInterval);
-          panel.webview.postMessage({ command: 'paid' });
-          bounty.invoicePaid = true;
-          bounties.set(test.id, bounty);
-          onBountiesChangedEmitter.fire();
-          vscode.window.showInformationMessage(
-            `Payment received! ${bounty.amountSats} sats funded.`
-          );
-          const syncSuccess = await updatePaidStatus(bounty.id);
-          if (!syncSuccess) {
-            console.error('[Invoice Poll] Invoice paid, but failed to sync with DB.');
-          }
-        }
-      } catch (err) {
-        console.error('[Invoice Poll] Error checking payment:', err);
-      }
-    }, 10000); // Poll every 10 seconds
-
-    // stop polling when panel closes
-    panel.onDidDispose(() => {
-      clearInterval(pollInterval);
-    });
-  } catch (err) {
-    const errMsg = escapeHtml(err instanceof Error ? err.message : 'Unknown error');
-    panel.webview.html = `
-      <h1>Error generating QR code</h1>
-      <p>${errMsg}</p>
-    `;
-    console.error('[setupInvoiceWebview] QR generation error:', err);
-  }
-}

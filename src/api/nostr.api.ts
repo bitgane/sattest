@@ -1,4 +1,4 @@
-import * as crypto from 'crypto';
+import { escapeHtml, getNonce } from '../util/html.js';
 import {
   generateSecretKey, // Uint8Array
   getPublicKey,
@@ -134,19 +134,6 @@ function waitForSignerHandshake(
   });
 }
 
-function escapeHtml(s: string): string {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
-
-function getNonce(): string {
-  return crypto.randomBytes(16).toString('base64');
-}
-
 /**
  * Replace the Connect to Nostr panel with a minimal "you're connected" view
  * after a successful pairing. Strips the QR / copy-URI / scan instructions so
@@ -215,9 +202,12 @@ import {
 } from '../state.js';
 import type { BunkerPointer } from 'nostr-tools/nip46';
 import type { VerifiedEvent } from 'nostr-tools';
-
-/** Content string for the write-scope credential required by the backend's `moneyAuth`. */
-export const WRITE_AUTH_CONTENT = 'sattest-auth:write';
+import {
+  NOSTR_AUTH_KIND,
+  READ_AUTH_CONTENT,
+  WRITE_AUTH_CONTENT,
+  REQUESTED_SIGNER_PERMS,
+} from './nostr-protocol.js';
 
 /**
  * Per-relay connection timeout. A relay that can't complete its WebSocket
@@ -225,17 +215,6 @@ export const WRITE_AUTH_CONTENT = 'sattest-auth:write';
  * the connect flow (see the Promise.allSettled dial in connectNostr).
  */
 const RELAY_CONNECT_TIMEOUT_MS = 5000;
-
-/**
- * Permissions requested up front in the `nostrconnect://` URI.
- *
- * Without these, the signer only grants what the user happens to tap through
- * during pairing, so a *later* background request (the write-scope credential
- * every money-moving call mints) can sit waiting on an approval the user never
- * sees. Asking for kind-22242 signing at connect time means the signer is
- * primed to answer those without another prompt.
- */
-const REQUESTED_SIGNER_PERMS = ['get_public_key', 'sign_event:22242'];
 
 /**
  * How long a signer request may run before we reassure the user it's still
@@ -857,13 +836,13 @@ export async function resolveNostrInfoFromBunkerSigner(
     updateStatus('Signing auth credentials...', '#007acc');
     const signedAuthEvent = await withSignerTimeout(
       bunker.signEvent({
-        kind: 22242,
+        kind: NOSTR_AUTH_KIND,
         created_at: Math.floor(Date.now() / 1000),
         tags: [
-          ['challenge', 'sattest-auth'],
+          ['challenge', READ_AUTH_CONTENT],
           ['relay', backendUrl],
         ],
-        content: 'sattest-auth',
+        content: READ_AUTH_CONTENT,
       }),
       'signing you in',
       SIGNER_CONNECT_TIMEOUT_MS,
@@ -1006,7 +985,7 @@ export async function signMoneyAuthEvent(
     // the user saw nothing at all (no payout, no error).
     return await withSignerTimeout(
       bunker.signEvent({
-        kind: 22242,
+        kind: NOSTR_AUTH_KIND,
         created_at: Math.floor(Date.now() / 1000),
         tags: [
           ['challenge', WRITE_AUTH_CONTENT],
