@@ -30,11 +30,24 @@ const NOSTR_CONNECT_KIND = 24133;
  * too strict for real-world signers and silently drops their responses — the
  * root cause of the "have to connect twice" bug:
  *   • it only decrypts NIP-44, but several signers (Primal among them) encrypt
- *     the connect response with NIP-04 → decrypt throws → event dropped;
- *   • it only accepts `result === <secret>`, but many signers reply with the
- *     legacy `result: "ack"` → event dropped.
- * We accept both encodings and both reply shapes, and log anything we drop so
- * the next interop quirk is diagnosable instead of silent.
+ *     the connect response with NIP-04 → decrypt throws → event dropped.
+ * We accept both encodings and log anything we drop so the next interop quirk
+ * is diagnosable instead of silent.
+ *
+ * THE CONNECT SECRET IS NOT OPTIONAL. NIP-46 requires the signer to echo the
+ * one-time `secret` from the nostrconnect:// URI — it is the only thing that
+ * authenticates the answering signer: our subscription filter (`#p:
+ * [clientPubkey]`) tells every configured relay exactly who to target, and
+ * anyone who saw the QR knows it too, so both can encrypt a payload to us —
+ * but neither knows the secret, which never leaves this machine except inside
+ * the URI. The legacy `result: "ack"` shape some signers send is therefore
+ * REJECTED, not accepted: a malicious relay could otherwise win the race
+ * against the user's real signer (first response wins, and the relay can
+ * answer milliseconds after the subscription opens — long before a human
+ * scans the QR) and bind this session to the attacker's key. Every later
+ * money call is signed by whatever signer we pair with, and the victim's NWC
+ * spending grant is stored server-side under the paired pubkey — a hijacked
+ * pairing hands the victim's wallet budget to the attacker.
  */
 function waitForSignerHandshake(
   pool: SimplePool,
@@ -90,11 +103,18 @@ function waitForSignerHandshake(
           }
           try {
             const response = JSON.parse(payload);
-            // Spec says echo the secret; many signers send the legacy "ack".
-            // Accept both — the success view shows the connected identity, so
-            // the user can see exactly who paired.
-            if (response.result === secret || response.result === 'ack') {
+            // Only the secret echo authenticates the signer (see the function
+            // docblock). A legacy "ack" carries no proof the responder knows
+            // the secret — it could come from any relay that saw our
+            // subscription — so it is rejected as a possible hijack attempt.
+            if (response.result === secret) {
               finish(() => resolve(event.pubkey));
+            } else if (response.result === 'ack') {
+              console.warn(
+                '[Nostr Connect] Rejected legacy "ack" connect response: it does not echo the ' +
+                  'pairing secret and cannot be authenticated (possible pairing-hijack attempt). ' +
+                  'Update your signer — NIP-46 requires echoing the secret.'
+              );
             } else if (response.error) {
               console.warn('[Nostr Connect] Signer reported error during connect:', response.error);
             } else {

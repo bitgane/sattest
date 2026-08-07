@@ -20,10 +20,9 @@ import {
   createBounty,
   deactivateBounty,
   getPendingClaims,
-  setBountyCreator,
   updatePaidStatus,
-  type PendingClaim,
 } from '../api/bounty.api.js';
+import type { PendingClaim } from '../api/bounty.api.js';
 import { connectNostr } from '../api/nostr.api.js';
 import {
   getIsDefaultLnbits,
@@ -313,8 +312,6 @@ export const addBountyCommand = (
       onBountiesChangedEmitter.fire();
       vscode.commands.executeCommand('setContext', 'testItemHasBounty', true);
 
-      let userPubkey = await getNostrUserPubkey();
-
       if (fundingMode === 'nwc') {
         // No invoice to fund — the creator's wallet pays directly on approval.
         vscode.window.showInformationMessage(
@@ -327,18 +324,6 @@ export const addBountyCommand = (
         vscode.window.showInformationMessage(
           `✅ Bounty created: ${amountSats} sats for "${test.label}". QR panel opened. Fund it!`
         );
-      }
-
-      if (!userPubkey) {
-        userPubkey = await getNostrUserPubkey();
-      }
-
-      if (userPubkey && userPubkey !== '' && userPubkey !== userNostrPubkey) {
-        const updated = await setBountyCreator(fullBounty.id, userPubkey);
-        if (updated) {
-          bounties.set(test.id, updated);
-          onBountiesChangedEmitter.fire();
-        }
       }
     } catch (error) {
       console.error('Error adding bounty:', error);

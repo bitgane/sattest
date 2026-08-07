@@ -65,7 +65,6 @@ jest.mock('../api/bounty.api', () => ({
   updatePaidStatus: jest.fn(),
   claimBountyWithLnAddress: jest.fn(),
   deactivateBounty: jest.fn(),
-  setBountyCreator: jest.fn(),
   approveClaim: jest.fn(),
   getPendingClaims: jest.fn(),
 }));
@@ -254,35 +253,6 @@ describe('addBountyCommand', () => {
     expect(vscode.window.showErrorMessage).toHaveBeenCalledWith(
       expect.stringContaining('Failed to create bounty')
     );
-  });
-
-  it('updates creator when pubkey changes after bounty creation', async () => {
-    const mockContext = createMockContext();
-    const mockTestItem = createMockTestItem({ id: 'test-creator' });
-
-    (vscode.window.showInputBox as jest.Mock).mockResolvedValueOnce('2000');
-    (getNostrUserPubkey as jest.Mock)
-      .mockResolvedValueOnce('initial-pubkey') // line 86: sets userNostrPubkey
-      .mockResolvedValueOnce('new-pubkey'); // line 148: sets userPubkey (different!)
-
-    (createBountyApi as jest.Mock).mockResolvedValue({
-      id: 'bounty-uuid',
-      testId: 'test-creator',
-      amountSats: 2000,
-      invoice: 'lnbc...',
-      paymentHash: 'hash',
-    });
-
-    const { setBountyCreator } = require('../api/bounty.api');
-    (setBountyCreator as jest.Mock).mockResolvedValue({
-      id: 'bounty-uuid',
-      creatorId: 'new-pubkey',
-    });
-
-    addBountyCommand(bounties, mockEmitter as any, mockContext);
-    await capturedHandler!(mockTestItem);
-
-    expect(setBountyCreator).toHaveBeenCalledWith('bounty-uuid', 'new-pubkey');
   });
 
   // ── NWC (non-custodial) is the only path ──────────────────────────────────

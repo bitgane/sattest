@@ -438,49 +438,6 @@ export async function deactivateBounty(
   }
 }
 
-/**
- * Sets the creator_id (Nostr pubkey) on an existing bounty.
- * @param id - The bounty ID (UUID)
- * @param creatorPubkey - The creator's Nostr pubkey (npub...)
- * @returns Updated bounty or null on failure
- */
-export async function setBountyCreator(
-  id: string,
-  creatorPubkey: string
-): Promise<BountyInfo | null> {
-  try {
-    const response = await authedFetch(
-      `${getBackendUrl()}/bounties/${encodeURIComponent(id)}/update-creator`,
-      {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          creatorId: creatorPubkey.trim(),
-        }),
-      },
-      { interactiveReauth: true, scope: 'write', operation: 'bounty setup' }
-    );
-
-    if (!response.ok) {
-      const errorText = await response.text().catch(() => 'Unknown error');
-      throw new Error(`Set creator failed: ${response.status} - ${errorText}`);
-    }
-
-    const updatedBounty = await response.json();
-
-    return updatedBounty;
-  } catch (error) {
-    if (error instanceof SignerCancelledError) {
-      return null;
-    }
-    console.error('[setBountyCreator] Error:', error);
-    vscode.window.showErrorMessage(
-      `Failed to set creator: ${error instanceof Error ? error.message : 'Unknown error'}`
-    );
-    return null;
-  }
-}
-
 export interface PendingClaim {
   id: string;
   claimantLnurl: string | null;

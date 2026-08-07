@@ -31,7 +31,6 @@ import {
   updatePaidStatus,
   claimBountyWithLnAddress,
   deactivateBounty,
-  setBountyCreator,
   approveClaim,
   getLnurlLimits,
   _resetRepoWarningForTests,
@@ -711,43 +710,6 @@ describe('deactivateBounty', () => {
 
     const result = await deactivateBounty('bounty-uuid');
     expect(result).toEqual({ success: true, refund: undefined });
-  });
-});
-
-describe('setBountyCreator', () => {
-  it('returns updated bounty on success', async () => {
-    const updatedBounty = { id: 'bounty-1', creatorId: 'npub123' };
-    jest.spyOn(global, 'fetch').mockResolvedValue({
-      ok: true,
-      json: async () => updatedBounty,
-    } as any);
-
-    const result = await setBountyCreator('bounty-1', '  npub123  ');
-    expect(result).toEqual(updatedBounty);
-
-    const body = JSON.parse((global.fetch as jest.Mock).mock.calls[0][1].body);
-    expect(body.creatorId).toBe('npub123'); // trimmed
-  });
-
-  it('returns null on non-OK response', async () => {
-    jest.spyOn(global, 'fetch').mockResolvedValue({
-      ok: false,
-      status: 404,
-      text: async () => 'Not found',
-    } as any);
-
-    const result = await setBountyCreator('bounty-1', 'npub123');
-    expect(result).toBeNull();
-    expect(vscode.window.showErrorMessage).toHaveBeenCalledWith(
-      expect.stringContaining('Failed to set creator')
-    );
-  });
-
-  it('returns null on network error', async () => {
-    jest.spyOn(global, 'fetch').mockRejectedValue(new Error('offline'));
-
-    const result = await setBountyCreator('bounty-1', 'npub123');
-    expect(result).toBeNull();
   });
 });
 

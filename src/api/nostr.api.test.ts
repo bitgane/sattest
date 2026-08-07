@@ -84,8 +84,12 @@ function handshakeFails(error: Error = new Error('Timeout')) {
  * Make the signer handshake succeed: the subscription delivers one encrypted
  * connect event (via microtask, so it works under fake timers too) and nip44
  * decrypts it to `{ result }`.
+ *
+ * The default result echoes the connect secret (`s3cr3t`), which is what the
+ * production code REQUIRES: a legacy `ack` reply is rejected as a possible
+ * pairing-hijack attempt. Pass an explicit result only to test rejection paths.
  */
-function handshakeSucceeds(result: string = 'ack', remotePubkey = 'remote-signer-pubkey') {
+function handshakeSucceeds(result: string = 's3cr3t', remotePubkey = 'remote-signer-pubkey') {
   (nip44.getConversationKey as jest.Mock).mockReturnValue(new Uint8Array(32));
   (nip44.decrypt as jest.Mock).mockReturnValue(JSON.stringify({ result }));
   sharedPool.subscribe.mockImplementation((_relays: unknown, _filter: unknown, opts: any) => {
@@ -361,6 +365,47 @@ describe('resolveNostrInfoFromBunkerSigner', () => {
     );
   });
 
+  it('ignores a legacy "ack" response and waits for the secret echo (anti pairing-hijack)', async () => {
+    // The attack: a malicious relay learns clientPubkey from our subscription
+    // filter and fires an unauthenticated "ack" before the user's real signer
+    // can answer. First response must NOT win — only the secret echo pairs.
+    const mockBunker = {
+      getPublicKey: jest.fn().mockResolvedValue('pk'),
+      signEvent: jest.fn().mockResolvedValue({ kind: 22242, sig: 'fake-sig' }),
+    };
+    (BunkerSigner.fromBunker as jest.Mock).mockReturnValue(mockBunker);
+    (nip44.getConversationKey as jest.Mock).mockReturnValue(new Uint8Array(32));
+    (nip44.decrypt as jest.Mock)
+      .mockReturnValueOnce(JSON.stringify({ result: 'ack' })) // attacker's response
+      .mockReturnValueOnce(JSON.stringify({ result: 's3cr3t' })); // the real signer's echo
+    sharedPool.subscribe.mockImplementation((_r: unknown, _f: unknown, opts: any) => {
+      Promise.resolve()
+        .then(() => opts.onevent({ pubkey: 'attacker-pubkey', content: 'enc' }))
+        .then(() => opts.onevent({ pubkey: 'remote-signer-pubkey', content: 'enc' }));
+      return { close: jest.fn() };
+    });
+    mockPool.get.mockResolvedValue(null);
+
+    const result = await resolveNostrInfoFromBunkerSigner(
+      new Uint8Array(32),
+      'nostr+connect://test?secret=s3cr3t',
+      ['wss://relay.test.com'],
+      mockPool,
+      mockContext,
+      mockPanel,
+      undefined,
+      0
+    );
+
+    expect(result?.userPubkey).toBe('pk');
+    // The session is bound to the REAL signer, never to the ack sender.
+    expect(BunkerSigner.fromBunker).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ pubkey: 'remote-signer-pubkey' }),
+      expect.anything()
+    );
+  });
+
   it('falls back to NIP-04 when NIP-44 decryption fails (signer interop)', async () => {
     const { nip04 } = require('nostr-tools');
     const mockBunker = {
@@ -375,8 +420,8 @@ describe('resolveNostrInfoFromBunkerSigner', () => {
     (nip44.decrypt as jest.Mock).mockImplementation(() => {
       throw new Error('invalid payload');
     });
-    // …NIP-04 succeeds with the legacy ack reply.
-    (nip04.decrypt as jest.Mock).mockReturnValue(JSON.stringify({ result: 'ack' }));
+    // …NIP-04 succeeds — and still has to echo the secret, like any response.
+    (nip04.decrypt as jest.Mock).mockReturnValue(JSON.stringify({ result: 's3cr3t' }));
     sharedPool.subscribe.mockImplementation((_r: unknown, _f: unknown, opts: any) => {
       Promise.resolve().then(() => opts.onevent({ pubkey: 'remote-signer-pubkey', content: 'enc' }));
       return { close: jest.fn() };
@@ -384,7 +429,7 @@ describe('resolveNostrInfoFromBunkerSigner', () => {
 
     const result = await resolveNostrInfoFromBunkerSigner(
       new Uint8Array(32),
-      'nostr+connect://test',
+      'nostr+connect://test?secret=s3cr3t',
       ['wss://relay.test.com'],
       mockPool,
       mockContext,
@@ -411,7 +456,7 @@ describe('resolveNostrInfoFromBunkerSigner', () => {
 
     const result = await resolveNostrInfoFromBunkerSigner(
       new Uint8Array(32),
-      'nostr+connect://test',
+      'nostr+connect://test?secret=s3cr3t',
       ['wss://relay.test.com'],
       mockPool,
       mockContext,
@@ -470,7 +515,7 @@ describe('resolveNostrInfoFromBunkerSigner', () => {
 
     await resolveNostrInfoFromBunkerSigner(
       new Uint8Array(32),
-      'nostr+connect://test',
+      'nostr+connect://test?secret=s3cr3t',
       ['wss://relay.test.com'],
       mockPool,
       mockContext,
@@ -502,7 +547,7 @@ describe('resolveNostrInfoFromBunkerSigner', () => {
 
       await resolveNostrInfoFromBunkerSigner(
         new Uint8Array(32),
-        'nostr+connect://test',
+        'nostr+connect://test?secret=s3cr3t',
         ['wss://relay.test.com'],
         mockPool,
         mockContext,
@@ -535,7 +580,7 @@ describe('resolveNostrInfoFromBunkerSigner', () => {
 
     const result = await resolveNostrInfoFromBunkerSigner(
       new Uint8Array(32),
-      'nostr+connect://test',
+      'nostr+connect://test?secret=s3cr3t',
       ['wss://relay.test.com'],
       mockPool,
       mockContext,
@@ -571,7 +616,7 @@ describe('resolveNostrInfoFromBunkerSigner', () => {
 
     await resolveNostrInfoFromBunkerSigner(
       new Uint8Array(32),
-      'nostr+connect://test',
+      'nostr+connect://test?secret=s3cr3t',
       ['wss://relay.nsec.app'], // only the signer relay connected in time
       mockPool,
       mockContext,
@@ -600,7 +645,7 @@ describe('resolveNostrInfoFromBunkerSigner', () => {
 
     await resolveNostrInfoFromBunkerSigner(
       new Uint8Array(32),
-      'nostr+connect://test',
+      'nostr+connect://test?secret=s3cr3t',
       ['wss://relay.test.com'],
       mockPool,
       mockContext,
@@ -629,7 +674,7 @@ describe('resolveNostrInfoFromBunkerSigner', () => {
 
     const result = await resolveNostrInfoFromBunkerSigner(
       new Uint8Array(32),
-      'nostr+connect://test',
+      'nostr+connect://test?secret=s3cr3t',
       ['wss://relay.test.com'],
       mockPool,
       mockContext,
@@ -659,7 +704,7 @@ describe('resolveNostrInfoFromBunkerSigner', () => {
 
     const result = await resolveNostrInfoFromBunkerSigner(
       new Uint8Array(32),
-      'nostr+connect://test',
+      'nostr+connect://test?secret=s3cr3t',
       ['wss://relay.test.com'],
       mockPool,
       mockContext,
@@ -684,7 +729,7 @@ describe('resolveNostrInfoFromBunkerSigner', () => {
 
     const result = await resolveNostrInfoFromBunkerSigner(
       new Uint8Array(32),
-      'nostr+connect://test',
+      'nostr+connect://test?secret=s3cr3t',
       ['wss://relay.test.com'],
       mockPool,
       mockContext,
@@ -705,7 +750,7 @@ describe('resolveNostrInfoFromBunkerSigner', () => {
 
     const result = await resolveNostrInfoFromBunkerSigner(
       new Uint8Array(32),
-      'nostr+connect://test',
+      'nostr+connect://test?secret=s3cr3t',
       ['wss://relay.test.com'],
       mockPool,
       mockContext,
@@ -733,7 +778,7 @@ describe('resolveNostrInfoFromBunkerSigner', () => {
 
     const result = await resolveNostrInfoFromBunkerSigner(
       new Uint8Array(32),
-      'nostr+connect://test',
+      'nostr+connect://test?secret=s3cr3t',
       ['wss://relay.test.com'],
       mockPool,
       mockContext,
@@ -758,7 +803,7 @@ describe('resolveNostrInfoFromBunkerSigner', () => {
 
     const result = await resolveNostrInfoFromBunkerSigner(
       new Uint8Array(32),
-      'nostr+connect://test',
+      'nostr+connect://test?secret=s3cr3t',
       ['wss://relay.test.com'],
       mockPool,
       mockContext,
