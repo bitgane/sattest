@@ -65,6 +65,9 @@ export function registerTests() {
 
 // Run discovery on activation
 export function activateTestController(context: vscode.ExtensionContext) {
+  // Dispose the controller (and all its discovered test items) on unload.
+  context.subscriptions.push(myTestController);
+
   registerTests();
 
   // Re-discover when a supported file is opened

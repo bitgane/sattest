@@ -5,7 +5,6 @@ import {
   checkPaidCommand,
   claimBountyCommand,
   approveClaimCommand,
-  getWalletId,
 } from './bounty.util.js';
 import { BountyInfo, ClaimInfo, ClaimStatus } from './bounty.types.js';
 import {
@@ -1712,40 +1711,5 @@ describe('approveClaimCommand', () => {
     expect(vscode.window.showWarningMessage).toHaveBeenCalledWith(
       expect.stringContaining('still not connected')
     );
-  });
-});
-
-describe('getWalletId', () => {
-  it('returns wallet ID on success', async () => {
-    jest.spyOn(global, 'fetch').mockResolvedValue({
-      ok: true,
-      json: async () => ({ id: 'wallet-123' }),
-    } as any);
-
-    const id = await getWalletId('https://lnbits.example.com', 'key-abc');
-    expect(id).toBe('wallet-123');
-    expect(global.fetch).toHaveBeenCalledWith(
-      'https://lnbits.example.com/api/v1/wallet',
-      expect.objectContaining({
-        headers: { 'X-Api-Key': 'key-abc' },
-      })
-    );
-  });
-
-  it('returns undefined on non-OK response', async () => {
-    jest.spyOn(global, 'fetch').mockResolvedValue({
-      ok: false,
-      status: 401,
-    } as any);
-
-    const id = await getWalletId('https://lnbits.example.com', 'bad-key');
-    expect(id).toBeUndefined();
-  });
-
-  it('returns undefined on network error', async () => {
-    jest.spyOn(global, 'fetch').mockRejectedValue(new Error('offline'));
-
-    const id = await getWalletId('https://lnbits.example.com', 'key');
-    expect(id).toBeUndefined();
   });
 });

@@ -7,10 +7,11 @@ import {
 } from './bounty.types.js';
 import { findTestItemById } from '../test/test-item.util.js';
 
-export class BountyCodeLensProvider implements vscode.CodeLensProvider {
+export class BountyCodeLensProvider implements vscode.CodeLensProvider, vscode.Disposable {
   private bounties: Map<string, BountyInfo>;
   private onBountiesChangedEmitter: vscode.EventEmitter<void>;
   private userNostrPubkey: string | undefined;
+  private changeSubscription: vscode.Disposable;
 
   // Event emitter for CodeLens refresh
   public _onDidChangeCodeLenses = new vscode.EventEmitter<void>();
@@ -26,9 +27,15 @@ export class BountyCodeLensProvider implements vscode.CodeLensProvider {
     this.userNostrPubkey = userNostrPubkey;
 
     // Listen to bounty changes → trigger CodeLens refresh
-    this.onBountiesChangedEmitter.event(() => {
+    this.changeSubscription = this.onBountiesChangedEmitter.event(() => {
       this._onDidChangeCodeLenses.fire();
     });
+  }
+
+  /** Release the change listener and refresh emitter when the extension unloads. */
+  dispose() {
+    this.changeSubscription.dispose();
+    this._onDidChangeCodeLenses.dispose();
   }
 
   /**

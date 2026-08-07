@@ -1134,22 +1134,6 @@ export const approveClaimCommand = (
   });
 };
 
-// Helper to get wallet ID (optional, but nice for debugging)
-export async function getWalletId(url: string, key: string): Promise<string | undefined> {
-  try {
-    const res = await fetch(`${url}/api/v1/wallet`, {
-      headers: { 'X-Api-Key': key },
-    });
-    if (res.ok) {
-      const data = await res.json();
-      return data.id;
-    }
-  } catch (e) {
-    console.error('Failed to get wallet ID:', e);
-  }
-  return undefined;
-}
-
 /**
  * Generates a QR code for the invoice and sets up the Webview panel HTML.
  * @param panel - The Webview panel to update

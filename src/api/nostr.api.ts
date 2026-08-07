@@ -480,6 +480,7 @@ export async function connectNostr(
     vscode.window.showErrorMessage(
       `Could not reach any configured Nostr relay (${relays.join(', ')}). Check your network or the sattest.nostrRelays setting.`
     );
+    pool.close(relays);
     return undefined;
   }
 
@@ -700,6 +701,10 @@ export async function connectNostr(
       panel.webview.html = qrHtml;
     }
   );
+  // The pairing handshake is finished — release the relay sockets this connect
+  // flow opened. Any later signing (money-auth, handle refresh) opens its own
+  // short-lived pool, so nothing here is reused.
+  pool.close(relays);
   if (!nostrConnection) {
     return;
   }

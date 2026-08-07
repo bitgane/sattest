@@ -24,6 +24,8 @@ export async function activate(context: vscode.ExtensionContext) {
 
   const bounties = new Map<string, BountyInfo>();
   const onBountiesChangedEmitter = new vscode.EventEmitter<void>();
+  // Dispose the shared bounty-change emitter when the extension unloads.
+  context.subscriptions.push(onBountiesChangedEmitter);
   const userNostrPubkey = await getNostrUserPubkey();
 
   // Teach the API layer how to recover an expired Nostr session: on a 401 from
@@ -217,7 +219,9 @@ export async function activate(context: vscode.ExtensionContext) {
     SUPPORTED_LANGUAGE_IDS.map((lang) => ({ language: lang, scheme: 'file' })),
     codeLensProvider
   );
-  context.subscriptions.push(disposable);
+  // Register the provider itself too, so its internal emitter + change listener
+  // are disposed on unload (see BountyCodeLensProvider.dispose).
+  context.subscriptions.push(disposable, codeLensProvider);
 
   // Force refresh for already-open editors on activation
   vscode.window.visibleTextEditors.forEach((editor) => {
@@ -259,9 +263,18 @@ export async function activate(context: vscode.ExtensionContext) {
   }, 2000);
 
   // Stop polling after 30 seconds max
-  setTimeout(() => {
+  const stopPollingTimeout = setTimeout(() => {
     clearInterval(checkTestItemsInterval);
   }, 30000);
+
+  // Tear the poll timers down if the extension deactivates before they clear
+  // themselves, so nothing keeps firing after unload.
+  context.subscriptions.push({
+    dispose: () => {
+      clearInterval(checkTestItemsInterval);
+      clearTimeout(stopPollingTimeout);
+    },
+  });
 }
 
 function attachTestItems(backendBounties: BountyInfo[], bounties: Map<string, BountyInfo>) {
