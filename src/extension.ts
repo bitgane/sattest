@@ -14,7 +14,9 @@ import { findTestItemById, getRepoSlug, getLocalTestIds } from './test/test-item
 import { activateTestController, myTestController } from './test/test-controller.js';
 import { CustomTestItem } from './test/test-item-wrapper.js';
 import { connectNostr, refreshNostrHandleIfStale } from './api/nostr.api.js';
-import { clearNwcUri, confirmBackendForNwc, getNwcStatus, setNwcUri } from './api/nwc.api.js';
+import { connectNostrCommand } from './bounty/commands/connect-nostr.js';
+import { connectWalletCommand } from './bounty/commands/connect-wallet.js';
+import { disconnectWalletCommand } from './bounty/commands/disconnect-wallet.js';
 import { setAuthRefresher } from './api/authed-fetch.js';
 import { getNostrUserPubkey, initializeSecrets } from './state.js';
 import { SUPPORTED_LANGUAGE_IDS } from './test/language-configs.js';
@@ -71,141 +73,9 @@ export async function activate(context: vscode.ExtensionContext) {
     checkPaidCommand(bounties, onBountiesChangedEmitter, context),
     claimBountyCommand(bounties, onBountiesChangedEmitter),
     approveClaimCommand(bounties, onBountiesChangedEmitter),
-    addClaimTrailerCommand(bounties)
-  );
-
-  context.subscriptions.push(
-    vscode.commands.registerCommand('sattest.connectNostr', async () => {
-      await connectNostr(context, onBountiesChangedEmitter);
-      // The code-lens provider was constructed during activation with whatever
-      // pubkey was cached at that moment (often `undefined`). Now that the
-      // user has connected, push the fresh pubkey in so the creator-only
-      // "Approve Claim" lens starts rendering on bounties they own.
-      const refreshedPubkey = await getNostrUserPubkey();
-      codeLensProvider.setUserNostrPubkey(refreshedPubkey);
-    })
-  );
-
-  // NWC (Nostr Wallet Connect) — lets the creator connect their own
-  // Lightning wallet so new bounties can be funded non-custodially. The URI
-  // is a secret: it's sent to the backend exactly once (PATCH /users/me/nwc)
-  // and never displayed afterwards.
-  context.subscriptions.push(
-    vscode.commands.registerCommand('sattest.connectWallet', async () => {
-      const userNostrPubkey = await getNostrUserPubkey();
-      if (!userNostrPubkey) {
-        vscode.window.showErrorMessage(
-          'Connect to Nostr first (Ctrl/Cmd+Alt+N), then link your wallet.'
-        );
-        return;
-      }
-      const uri = await vscode.window.showInputBox({
-        title: 'Connect Lightning Wallet (NIP-47)',
-        prompt: 'Paste your NWC connection string from Alby Hub, Mutiny, Coinos, etc.',
-        placeHolder: 'nostr+walletconnect://...',
-        password: true,
-        ignoreFocusOut: true,
-        validateInput: (v) =>
-          v.trim().startsWith('nostr+walletconnect://')
-            ? null
-            : 'Expected a nostr+walletconnect:// URI',
-      });
-      if (!uri) {
-        return;
-      }
-
-      // The NWC URI is a spending credential. Before it leaves the machine,
-      // confirm the destination when it isn't the default backend or localhost
-      // (guards a social-engineered backendUrl change).
-      if (!(await confirmBackendForNwc(context))) {
-        vscode.window.showWarningMessage(
-          'Wallet not connected — backend not confirmed. Check sattest.backendUrl in your User settings.'
-        );
-        return;
-      }
-
-      // Budget window is informational — the real limit lives in the
-      // creator's wallet. We surface it in the UI for reassurance.
-      const windowChoice = await vscode.window.showQuickPick(
-        [
-          { label: 'Daily budget window', value: 'daily' as const },
-          { label: 'Weekly budget window', value: 'weekly' as const },
-          { label: 'Monthly budget window', value: 'monthly' as const },
-          { label: 'Skip — set in my wallet app', value: undefined },
-        ],
-        { title: 'Budget window (optional, display only)', ignoreFocusOut: true }
-      );
-      if (windowChoice === undefined) {
-        return; // user dismissed the quick pick
-      }
-
-      let budgetSats: number | undefined;
-      if (windowChoice.value) {
-        // A window was chosen, so an amount is required — connecting without a
-        // budget is the quick-pick's explicit "Skip" option, not a blank here.
-        const satsInput = await vscode.window.showInputBox({
-          title: `Budget per ${windowChoice.value} window`,
-          prompt: 'Sats (display only — enforced by your wallet)',
-          placeHolder: 'e.g. 100000',
-          validateInput: (v) =>
-            /^\d+$/.test(v.trim()) && Number(v.trim()) > 0
-              ? null
-              : 'Enter a positive whole number',
-        });
-        if (satsInput === undefined) {
-          return; // dismissed → cancel the whole connect, no DB change
-        }
-        budgetSats = Number(satsInput.trim());
-      }
-
-      let result = await setNwcUri(uri.trim(), budgetSats, windowChoice.value);
-      if (result === 'auth-expired') {
-        // The stored Nostr auth event aged out. Keep the pasted URI in scope
-        // (never persisted — it holds the spending secret), reopen Connect to
-        // Nostr so the user can refresh their session, then retry once with the
-        // now-fresh auth. Refreshing Nostr completes the connection on its own —
-        // the user never has to re-run this command.
-        const reconnected = await connectNostr(context, onBountiesChangedEmitter, {
-          noticeMessage: 'Refresh your Nostr login to complete your wallet connection.',
-        });
-        if (reconnected) {
-          result = await setNwcUri(uri.trim(), budgetSats, windowChoice.value);
-        }
-      }
-
-      if (result === 'ok') {
-        vscode.window.showInformationMessage(
-          '✅ Lightning wallet connected. New bounties can now be funded non-custodially.'
-        );
-      } else if (result === 'auth-expired') {
-        // Reconnect dismissed, or (rare) the refreshed auth still failed.
-        vscode.window.showWarningMessage(
-          'Wallet not connected — refresh your Nostr login to finish connecting.'
-        );
-      }
-    })
-  );
-
-  context.subscriptions.push(
-    vscode.commands.registerCommand('sattest.disconnectWallet', async () => {
-      const status = await getNwcStatus();
-      if (!status.configured) {
-        vscode.window.showInformationMessage('No Lightning wallet is currently connected.');
-        return;
-      }
-      const confirm = await vscode.window.showWarningMessage(
-        'Disconnect your Lightning wallet? Existing non-custodial bounties will fail to pay out on approval until you reconnect.',
-        { modal: true },
-        'Disconnect'
-      );
-      if (confirm !== 'Disconnect') {
-        return;
-      }
-      const ok = await clearNwcUri();
-      if (ok) {
-        vscode.window.showInformationMessage('Lightning wallet disconnected.');
-      }
-    })
+    addClaimTrailerCommand(bounties),
+    connectWalletCommand(context, onBountiesChangedEmitter),
+    disconnectWalletCommand()
   );
 
   // Create and register CodeLens provider
@@ -222,6 +92,13 @@ export async function activate(context: vscode.ExtensionContext) {
   // Register the provider itself too, so its internal emitter + change listener
   // are disposed on unload (see BountyCodeLensProvider.dispose).
   context.subscriptions.push(disposable, codeLensProvider);
+
+  // Registered after the code-lens provider is built: on connect, the command
+  // pushes the freshly-paired pubkey into the provider so the creator-only
+  // "Approve Claim" lens starts rendering on bounties they own.
+  context.subscriptions.push(
+    connectNostrCommand(context, onBountiesChangedEmitter, codeLensProvider)
+  );
 
   // Force refresh for already-open editors on activation
   vscode.window.visibleTextEditors.forEach((editor) => {
