@@ -3,11 +3,17 @@ import {
   BountyInfo,
   claimStatusApproved,
   claimStatusApproving,
+  claimStatusPending,
 } from '../bounty.types.js';
 import { removeParentLabelFromTestId } from '../../test/test-item.util.js';
 import { getNostrUserPubkey } from '../../state.js';
 import { getNwcStatus } from '../../api/nwc.api.js';
-import { approveClaim, getPendingClaims, type PendingClaim } from '../../api/bounty.api.js';
+import {
+  approveClaim,
+  getPendingClaims,
+  resolveHeldClaim,
+  type PendingClaim,
+} from '../../api/bounty.api.js';
 import {
   evidenceIcon,
   evidenceLabel,
@@ -329,6 +335,58 @@ export const approveClaimCommand = (
         }
         bounties.set(test.id, bounty);
         onBountiesChangedEmitter.fire();
+        return;
+      }
+
+      if (result === 'needs-confirmation') {
+        // The wallet that made the payout is no longer the one connected, so
+        // nothing can be queried about it — re-checking would loop forever.
+        // Only the creator, looking at their own wallet history, can settle
+        // this. The modal has to be blunt: both answers carry a real cost, and
+        // Cancel (leave it held) is the safe default.
+        const choice = await vscode.window.showWarningMessage(
+          `Did your wallet send the ${bounty.amountSats} sats for this claim?`,
+          {
+            modal: true,
+            detail:
+              'Sattest can\'t tell. This payout was sent from a wallet that is no ' +
+              'longer connected, so there is nothing left to ask.\n\n' +
+              'Check the sending wallet\'s history for an outgoing payment of ' +
+              `${bounty.amountSats} sats (or ask the claimant whether it arrived), then choose:\n\n` +
+              '• "It was paid" closes the claim out. No further payment is made.\n' +
+              '• "It was NOT paid" unlocks the claim so you can pay it from your ' +
+              'current wallet — if it actually did go through, that pays twice.\n\n' +
+              'Cancel leaves the claim on hold, which is safe.',
+          },
+          'It was paid',
+          'It was NOT paid'
+        );
+
+        if (choice !== 'It was paid' && choice !== 'It was NOT paid') {
+          return;
+        }
+
+        const resolved = await resolveHeldClaim(
+          bounty.id,
+          pendingClaim.id,
+          choice === 'It was paid' ? 'paid' : 'not-paid'
+        );
+        if (!resolved) {
+          return;
+        }
+
+        if (bounty.claims?.[0]) {
+          bounty.claims[0].status =
+            choice === 'It was paid' ? claimStatusApproved : claimStatusPending;
+        }
+        bounties.set(test.id, bounty);
+        onBountiesChangedEmitter.fire();
+
+        vscode.window.showInformationMessage(
+          choice === 'It was paid'
+            ? 'Claim closed out as paid. No further payment was sent.'
+            : 'Claim unlocked — run Approve Claim again to pay it from your current wallet.'
+        );
         return;
       }
 

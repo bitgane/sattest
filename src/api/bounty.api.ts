@@ -515,6 +515,7 @@ export type ApproveClaimResult =
   | 'already-approved'
   | 'in-progress'
   | 'outcome-unknown'
+  | 'needs-confirmation'
   | 'claimant-changed'
   | null;
 
@@ -575,6 +576,14 @@ export async function approveClaim(
         console.warn('[approveClaim] payout outcome unknown:', errorMessage);
         return 'outcome-unknown';
       }
+      // No wallet can ever report on this attempt — the wallet that made it is
+      // no longer the one connected. Re-checking will never resolve it, so the
+      // caller must offer the creator the manual confirmation instead of
+      // looping on a lookup that cannot succeed.
+      if (code === 'PAYOUT_NEEDS_CONFIRMATION') {
+        console.warn('[approveClaim] payout needs manual confirmation:', errorMessage);
+        return 'needs-confirmation';
+      }
       // The set of claims moved under us between review and approve, or the
       // claim we named belongs to someone else. Not a failure to retry blindly
       // — the creator has to look again at who they're paying.
@@ -602,5 +611,56 @@ export async function approveClaim(
       `Failed to approve claim: ${error instanceof Error ? error.message : 'Unknown error'}`
     );
     return null;
+  }
+}
+
+/**
+ * Record the creator's own verdict on a payout that no wallet can report on.
+ *
+ * Only reachable after the backend has said `PAYOUT_NEEDS_CONFIRMATION` — i.e.
+ * the wallet that made the attempt is no longer connected, so there is nothing
+ * left to query. `'paid'` closes the claim out without a second payment;
+ * `'not-paid'` unlocks it so the payout can be retried from the current wallet.
+ *
+ * Returns true when the claim was resolved.
+ */
+export async function resolveHeldClaim(
+  bountyId: string,
+  claimId: string,
+  outcome: 'paid' | 'not-paid'
+): Promise<boolean> {
+  try {
+    const response = await authedFetch(
+      `${getBackendUrl()}/bounties/${encodeURIComponent(bountyId)}/claims/${encodeURIComponent(
+        claimId
+      )}/resolve`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ outcome }),
+      },
+      { interactiveReauth: true, scope: 'write', operation: 'payout confirmation' }
+    );
+
+    if (!response.ok) {
+      let errorMessage = `Resolve failed: ${response.status}`;
+      try {
+        const errorData = await response.json();
+        errorMessage = errorData.error || errorMessage;
+      } catch {
+        /* body wasn't JSON */
+      }
+      throw new Error(errorMessage);
+    }
+    return true;
+  } catch (error) {
+    if (error instanceof SignerCancelledError) {
+      return false;
+    }
+    console.error('[resolveHeldClaim] Error:', error);
+    vscode.window.showErrorMessage(
+      `Failed to resolve claim: ${error instanceof Error ? error.message : 'Unknown error'}`
+    );
+    return false;
   }
 }

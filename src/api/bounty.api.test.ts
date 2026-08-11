@@ -32,6 +32,7 @@ import {
   claimBountyWithLnAddress,
   deactivateBounty,
   approveClaim,
+  resolveHeldClaim,
   getLnurlLimits,
   _resetRepoWarningForTests,
 } from './bounty.api.js';
@@ -823,6 +824,24 @@ describe('approveClaim', () => {
     expect(vscode.window.showErrorMessage).not.toHaveBeenCalled();
   });
 
+  it('returns "needs-confirmation" when no wallet can report on the payout', async () => {
+    // The wallet that sent it is no longer connected, so re-checking can never
+    // resolve this. The caller must switch to asking the creator instead of
+    // looping — and this is not an error toast either.
+    jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: false,
+      status: 409,
+      json: async () => ({
+        error: 'The wallet now connected is not the one this payout was sent from…',
+        code: 'PAYOUT_NEEDS_CONFIRMATION',
+      }),
+    } as any);
+
+    const result = await approveClaim('bounty-1', 'approver-pub');
+    expect(result).toBe('needs-confirmation');
+    expect(vscode.window.showErrorMessage).not.toHaveBeenCalled();
+  });
+
   it('still surfaces a genuine 502 payout failure as an error', async () => {
     // Contrast with the case above: an outcome-less 502 (wallet declined) is a
     // real failure and should still toast.
@@ -836,6 +855,51 @@ describe('approveClaim', () => {
     expect(result).toBeNull();
     expect(vscode.window.showErrorMessage).toHaveBeenCalledWith(
       expect.stringMatching(/budget exceeded/)
+    );
+  });
+});
+
+describe('resolveHeldClaim', () => {
+  it('POSTs the creator\'s verdict to the claim-scoped resolve endpoint', async () => {
+    const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({ success: true, outcome: 'paid' }),
+    } as any);
+
+    const ok = await resolveHeldClaim('bounty-1', 'claim-9', 'paid');
+
+    expect(ok).toBe(true);
+    const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    // Claim-scoped: the verdict must name the exact claim it applies to.
+    expect(url).toContain('/bounties/bounty-1/claims/claim-9/resolve');
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(init.body as string)).toEqual({ outcome: 'paid' });
+  });
+
+  it('sends the not-paid verdict verbatim', async () => {
+    const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({ success: true }),
+    } as any);
+
+    await resolveHeldClaim('bounty-1', 'claim-9', 'not-paid');
+
+    const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual({ outcome: 'not-paid' });
+  });
+
+  it('returns false and surfaces the backend reason on rejection', async () => {
+    jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: false,
+      status: 400,
+      json: async () => ({ error: 'Only non-custodial (NWC) payouts can be resolved this way' }),
+    } as any);
+
+    const ok = await resolveHeldClaim('bounty-1', 'claim-9', 'paid');
+
+    expect(ok).toBe(false);
+    expect(vscode.window.showErrorMessage).toHaveBeenCalledWith(
+      expect.stringMatching(/non-custodial/i)
     );
   });
 });
