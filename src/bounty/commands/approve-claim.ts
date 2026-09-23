@@ -1,6 +1,8 @@
 import * as vscode from 'vscode';
 import {
   BountyInfo,
+  ClaimInfo,
+  ClaimStatus,
   claimStatusApproved,
   claimStatusApproving,
   claimStatusPending,
@@ -180,6 +182,25 @@ export const approveClaimCommand = (
     }
     const pendingClaim = chosen.claim;
 
+    // Reflect a resolved payout on the claim the creator actually chose.
+    //
+    // These writes used to target `bounty.claims[0]`. The cached listing is
+    // ordered newest-first and a bounty can hold several open claims, so index 0
+    // is whoever filed last — not necessarily the claim being paid. Approving
+    // the second of three claims therefore stamped an unrelated claim as
+    // approved, and the lens rendered that wrong state until the next fetch.
+    const setChosenClaimStatus = (status: ClaimStatus) => {
+      const claims = (bounty.claims ??= []);
+      const target = claims.find((c) => c.id === pendingClaim.id);
+      if (target) {
+        target.status = status;
+        return;
+      }
+      // The cached listing predates this claim (it carries only id + status).
+      // Insert it rather than leaving the lens showing a stale state.
+      claims.unshift({ id: pendingClaim.id, status } as ClaimInfo);
+    };
+
     // Build the destination line for the confirmation dialog. When the claimant
     // opted into privacy, the backend redacts the address (`claimantLnurl` is
     // null, `lnurlHidden` true) — the creator approves without seeing it. The
@@ -330,9 +351,7 @@ export const approveClaimCommand = (
             'your wallet; click the "Payout Processing" lens in a minute to re-check.'
         );
         // Reflect the on-hold state so the lens stops offering Approve.
-        if (bounty.claims?.[0]) {
-          bounty.claims[0].status = claimStatusApproving;
-        }
+        setChosenClaimStatus(claimStatusApproving);
         bounties.set(test.id, bounty);
         onBountiesChangedEmitter.fire();
         return;
@@ -375,10 +394,9 @@ export const approveClaimCommand = (
           return;
         }
 
-        if (bounty.claims?.[0]) {
-          bounty.claims[0].status =
-            choice === 'It was paid' ? claimStatusApproved : claimStatusPending;
-        }
+        setChosenClaimStatus(
+          choice === 'It was paid' ? claimStatusApproved : claimStatusPending
+        );
         bounties.set(test.id, bounty);
         onBountiesChangedEmitter.fire();
 
@@ -393,9 +411,7 @@ export const approveClaimCommand = (
       // Fresh success, or the backend told us it was already approved (a
       // duplicate that raced us). Either way the claim is approved and paid —
       // reflect that locally and show the success toast, never a failure.
-      if (bounty.claims?.[0]) {
-        bounty.claims[0].status = claimStatusApproved;
-      }
+      setChosenClaimStatus(claimStatusApproved);
       bounties.set(test.id, bounty);
       onBountiesChangedEmitter.fire();
 

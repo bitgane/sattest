@@ -1,11 +1,51 @@
 import * as vscode from 'vscode';
 import {
   BountyInfo,
+  ClaimInfo,
+  ClaimStatus,
   claimStatusApproved,
   claimStatusApproving,
   claimStatusPending,
 } from './bounty.types.js';
-import { findTestItemById } from '../test/test-item.util.js';
+import { buildTestItemIndex, findTestItemById, testIdFilePath } from '../test/test-item.util.js';
+
+/** POSIX ("/a/b") or Windows ("C:\\a\\b") absolute path, as `Uri.fsPath` yields. */
+function isAbsolutePathLike(value: string): boolean {
+  return /^(?:[a-zA-Z]:[\\/]|\/)/.test(value);
+}
+
+/**
+ * The claim state the lens should display for a bounty.
+ *
+ * A bounty can carry several open claims — the backend deliberately returns all
+ * of them so the creator chooses whom to pay — so `claims[0]` is not "the
+ * bounty's state", it is merely whichever claim was filed most recently, and
+ * that ordering is attacker-influenced. Reading it directly meant a bounty whose
+ * payout was already in flight still rendered "Claim Pending" (and offered
+ * Approve) as soon as anyone filed a newer claim.
+ *
+ * Collapse the set by how far it has progressed instead: an approved claim means
+ * the bounty is paid, an approving one means a payout is in flight and nothing
+ * else may be offered, and only then does a pending claim decide the lens.
+ */
+export function aggregateClaimStatus(
+  claims: ClaimInfo[] | undefined
+): ClaimStatus | undefined {
+  if (!claims || claims.length === 0) {
+    return undefined;
+  }
+  const statuses = new Set(claims.map((c) => c.status));
+  if (statuses.has(claimStatusApproved)) {
+    return claimStatusApproved;
+  }
+  if (statuses.has(claimStatusApproving)) {
+    return claimStatusApproving;
+  }
+  if (statuses.has(claimStatusPending)) {
+    return claimStatusPending;
+  }
+  return undefined;
+}
 
 export class BountyCodeLensProvider implements vscode.CodeLensProvider, vscode.Disposable {
   private bounties: Map<string, BountyInfo>;
@@ -57,8 +97,33 @@ export class BountyCodeLensProvider implements vscode.CodeLensProvider, vscode.D
     document: vscode.TextDocument
   ): vscode.CodeLens[] | Thenable<vscode.CodeLens[]> {
     const lenses: vscode.CodeLens[] = [];
-    for (const [testId, bounty] of this.bounties.entries()) {
-      const item = findTestItemById(testId);
+
+    // Bounties that cannot belong to this document are rejected on a string
+    // compare, before any test item is resolved. VS Code calls this on open, on
+    // edit, on scroll and on every refresh fire, so the common case — a file
+    // holding none of the workspace's bounties — must not cost a lookup each.
+    const documentPath = document.uri.fsPath;
+    const candidates = [...this.bounties.entries()].filter(([testId]) => {
+      const testPath = testIdFilePath(testId);
+      // Only skip on an id that actually carries an absolute workspace path —
+      // the shape `normalizedTestId` produces. Any other id (a bare label, a
+      // relative path) falls through to the authoritative uri check below, so an
+      // unrecognised id costs a lookup rather than silently losing its lens.
+      if (!isAbsolutePathLike(testPath)) {
+        return true;
+      }
+      return testPath === documentPath;
+    });
+
+    if (candidates.length === 0) {
+      return lenses;
+    }
+
+    // One tree walk for the whole render rather than one per bounty.
+    const testItemIndex = buildTestItemIndex();
+
+    for (const [testId, bounty] of candidates) {
+      const item = findTestItemById(testId, testItemIndex);
 
       if (!item) {
         continue;
@@ -77,7 +142,7 @@ export class BountyCodeLensProvider implements vscode.CodeLensProvider, vscode.D
       let title = '';
       let command = '';
       let tooltip = '';
-      const claimStatus = bounty.claims?.[0]?.status;
+      const claimStatus = aggregateClaimStatus(bounty.claims);
       const isNwc = bounty.fundingMode === 'nwc';
       // Tag non-custodial bounties so the creator and potential claimers can
       // see at a glance that sats live in the creator's own wallet, not our

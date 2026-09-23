@@ -5,6 +5,7 @@ import { authedFetch } from './authed-fetch.js';
 import { getBackendUrl } from './config.js';
 import { createLnbitsInvoice } from './lnbits.api.js';
 import { SignerCancelledError } from './signer-errors.js';
+import { describeErrorResponse, handleApiError } from './api-error.js';
 
 export interface FetchBountiesOptions {
   testId?: string;
@@ -271,19 +272,17 @@ export async function updatePaidStatus(id: string): Promise<boolean> {
     );
 
     if (!response.ok) {
-      const errorText = await response.text().catch(() => 'Unknown error');
-      throw new Error(`Backend update failed: ${response.status} - ${errorText}`);
+      throw new Error(
+        await describeErrorResponse(response, `Backend update failed: ${response.status}`)
+      );
     }
 
     return true;
   } catch (error) {
-    if (error instanceof SignerCancelledError) {
-      return false;
-    }
-    console.error('[updatePaidStatus] Error updating paid status:', error);
-    vscode.window.showErrorMessage(
-      `Failed to sync payment status: ${error instanceof Error ? error.message : 'Unknown error'}`
-    );
+    handleApiError(error, {
+      scope: 'updatePaidStatus',
+      userMessage: 'Failed to sync payment status',
+    });
     return false;
   }
 }
@@ -317,21 +316,16 @@ export async function claimBountyWithLnAddress(
     );
 
     if (!claimResponse.ok) {
-      const errorText = await claimResponse.text().catch(() => 'Unknown error');
-      throw new Error(`Claim failed: ${claimResponse.status} - ${errorText}`);
+      throw new Error(
+        await describeErrorResponse(claimResponse, `Claim failed: ${claimResponse.status}`)
+      );
     }
 
     const updatedClaim = await claimResponse.json();
 
     return updatedClaim;
   } catch (error) {
-    if (error instanceof SignerCancelledError) {
-      return null;
-    }
-    console.error('[claimBounty] Error claiming bounty:', error);
-    vscode.window.showErrorMessage(
-      `Failed to claim bounty: ${error instanceof Error ? error.message : 'Unknown error'}`
-    );
+    handleApiError(error, { scope: 'claimBounty', userMessage: 'Failed to claim bounty' });
     return null;
   }
 }
@@ -400,21 +394,12 @@ export async function deactivateBounty(
     );
 
     if (!response.ok) {
-      let errorMessage = `Deactivation failed: ${response.status}`;
-      try {
-        const errorData = await response.json();
-        // Prefer the dev-mode `message` (real exception text) over the
-        // generic `error` ("Failed to deactivate bounty") so the user
-        // actually sees what went wrong instead of a tautology.
-        const detail =
-          errorData.message && errorData.message !== 'Internal server error'
-            ? `${errorData.error}: ${errorData.message}`
-            : errorData.error || errorData.message;
-        errorMessage = detail || errorMessage;
-      } catch {
-        /* body wasn't JSON */
-      }
-      throw new Error(errorMessage);
+      // Prefers the dev-mode `message` (real exception text) over the generic
+      // `error` ("Failed to deactivate bounty") so the user sees what actually
+      // went wrong instead of a tautology.
+      throw new Error(
+        await describeErrorResponse(response, `Deactivation failed: ${response.status}`)
+      );
     }
 
     const data = (await response.json().catch(() => ({}))) as {
@@ -427,13 +412,10 @@ export async function deactivateBounty(
       refund: data.refund,
     };
   } catch (error) {
-    if (error instanceof SignerCancelledError) {
-      return { success: false };
-    }
-    console.error('[deactivateBounty] Error:', error);
-    vscode.window.showErrorMessage(
-      `Failed to deactivate bounty: ${error instanceof Error ? error.message : 'Unknown error'}`
-    );
+    handleApiError(error, {
+      scope: 'deactivateBounty',
+      userMessage: 'Failed to deactivate bounty',
+    });
     return { success: false };
   }
 }
@@ -603,13 +585,7 @@ export async function approveClaim(
     const updatedBounty = await response.json();
     return updatedBounty;
   } catch (error) {
-    if (error instanceof SignerCancelledError) {
-      return null;
-    }
-    console.error('[approveClaim] Error approving claim:', error);
-    vscode.window.showErrorMessage(
-      `Failed to approve claim: ${error instanceof Error ? error.message : 'Unknown error'}`
-    );
+    handleApiError(error, { scope: 'approveClaim', userMessage: 'Failed to approve claim' });
     return null;
   }
 }
@@ -643,24 +619,13 @@ export async function resolveHeldClaim(
     );
 
     if (!response.ok) {
-      let errorMessage = `Resolve failed: ${response.status}`;
-      try {
-        const errorData = await response.json();
-        errorMessage = errorData.error || errorMessage;
-      } catch {
-        /* body wasn't JSON */
-      }
-      throw new Error(errorMessage);
+      throw new Error(
+        await describeErrorResponse(response, `Resolve failed: ${response.status}`)
+      );
     }
     return true;
   } catch (error) {
-    if (error instanceof SignerCancelledError) {
-      return false;
-    }
-    console.error('[resolveHeldClaim] Error:', error);
-    vscode.window.showErrorMessage(
-      `Failed to resolve claim: ${error instanceof Error ? error.message : 'Unknown error'}`
-    );
+    handleApiError(error, { scope: 'resolveHeldClaim', userMessage: 'Failed to resolve claim' });
     return false;
   }
 }

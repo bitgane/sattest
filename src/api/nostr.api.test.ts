@@ -31,6 +31,12 @@ jest.mock('nostr-tools/utils', () => ({
   bytesToHex: jest
     .fn()
     .mockReturnValue('0101010101010101010101010101010101010101010101010101010101010101'),
+  // nostr.api.ts now takes hexToBytes from the library instead of hand-rolling
+  // it. Same semantics as the implementation it replaced, so a stored client
+  // secret still round-trips through the connect flow.
+  hexToBytes: jest.fn((hex: string) =>
+    Uint8Array.from((hex.match(/.{1,2}/g) ?? []).map((byte) => parseInt(byte, 16)))
+  ),
 }));
 
 jest.mock('qrcode', () => ({

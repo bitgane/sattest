@@ -7,7 +7,7 @@ import {
 import * as vscode from 'vscode';
 import { BunkerSigner, createNostrConnectURI } from 'nostr-tools/nip46';
 
-import { bytesToHex } from 'nostr-tools/utils';
+import { bytesToHex, hexToBytes } from 'nostr-tools/utils';
 import * as QRCode from 'qrcode';
 import { getBackendUrl } from './config.js';
 import {
@@ -16,7 +16,14 @@ import {
   SignerCancelledError,
   SignerTimeoutError,
 } from './signer-errors.js';
-import { renderConnectedSuccess } from './nostr-connect-webview.js';
+import {
+  connectBanners,
+  renderConnectedSuccess,
+  renderConnecting,
+  renderConnectPlaceholder,
+  renderConnectQr,
+  renderRelayFailure,
+} from './nostr-connect-webview.js';
 import {
   waitForSignerHandshake,
   fetchProfileHandle,
@@ -172,21 +179,7 @@ export async function connectNostr(
   // Paint a bare "connecting" page immediately so the panel is never blank
   // while relays are dialed (the fuller placeholder with banners repaints
   // below, before the QR is revealed).
-  panel.webview.html = `
-        <!DOCTYPE html>
-        <html lang="en">
-        <head>
-            <meta charset="UTF-8">
-            <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';">
-            <title>Connect to Nostr</title>
-            <style>body { font-family: monospace; padding: 20px; background: #f5f5f5; color: #333; text-align: center; }</style>
-        </head>
-        <body>
-            <h2>Connect to Nostr</h2>
-            <p>Connecting to Nostr relays…</p>
-        </body>
-        </html>
-    `;
+  panel.webview.html = renderConnecting();
 
   // Dial the configured relays in parallel, tolerating individual failures —
   // a single dead or slow relay must not kill the whole connect flow. Only
@@ -203,24 +196,7 @@ export async function connectNostr(
     );
   }
   if (liveRelays.length === 0) {
-    panel.webview.html = `
-        <!DOCTYPE html>
-        <html lang="en">
-        <head>
-            <meta charset="UTF-8">
-            <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';">
-            <title>Connect to Nostr</title>
-            <style>
-            body { font-family: monospace; padding: 20px; background: #f5f5f5; color: #333; text-align: center; }
-            .error { background: #fdecea; border: 1px solid #f5c6cb; color: #721c24; padding: 12px; border-radius: 4px; line-height: 1.5; }
-            </style>
-        </head>
-        <body>
-            <h2>Connect to Nostr</h2>
-            <div class="error">Could not reach any configured Nostr relay:<br>${relays.map(escapeHtml).join('<br>')}<br><br>Check your network, or adjust the <b>sattest.nostrRelays</b> setting.</div>
-        </body>
-        </html>
-    `;
+    panel.webview.html = renderRelayFailure(relays);
     vscode.window.showErrorMessage(
       `Could not reach any configured Nostr relay (${relays.join(', ')}). Check your network or the sattest.nostrRelays setting.`
     );
@@ -270,169 +246,25 @@ export async function connectNostr(
       : `${currentPubkey.slice(0, 8)}…${currentPubkey.slice(-4)}`
     : undefined;
 
-  // Optional call-to-action banner — shown when the panel is opened mid-flow to
-  // recover an expired session (e.g. completing an NWC wallet connection).
-  // Never tied to whichever identity was previously connected: any Nostr
-  // identity may complete this flow, so the notice stays generic.
-  const noticeText = opts?.noticeMessage;
-  const noticeBannerHtml = noticeText
-    ? `<div class="notice-action">${escapeHtml(noticeText)}</div>`
-    : '';
-
-  // Green "Connected as" banner — shown when an identity is already connected.
-  //
-  // Mutually exclusive with the yellow refresh/reconnect notice: those two
-  // contradict each other at a glance ("Connected as @alice" next to "Refresh
-  // your Nostr connection"). When a notice is present the flow's whole point is
-  // that the session needs re-pairing, so the notice wins and the green banner
-  // is suppressed.
-  const connectedBannerHtml =
-    identityDisplay && !noticeText
-      ? `<div class="connected">Connected as ${escapeHtml(identityDisplay)}</div>`
-      : '';
+  // Banner fragments for the views below. The yellow call-to-action and the
+  // green "Connected as" banner are mutually exclusive — see `connectBanners`.
+  const banners = connectBanners(opts?.noticeMessage, identityDisplay);
 
   // Full QR view — built now but NOT painted yet. We reveal it only after the
   // signer-response subscription has had a moment to go live (see below), so
   // the user's first scan lands on a warm listener.
+  // Full QR view — built now but NOT painted yet. We reveal it only after the
+  // signer-response subscription has had a moment to go live (see below), so
+  // the user's first scan lands on a warm listener.
   const nonce = getNonce();
-  const qrHtml = `
-        <!DOCTYPE html>
-        <html lang="en">
-        <head>
-            <meta charset="UTF-8">
-            <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Connect to Nostr</title>
-            <style>
-            body {
-                font-family: monospace;
-                padding: 20px;
-                background: #f5f5f5;
-                color: #333;
-                margin: 0;
-            }
-            h2 {
-                text-align: center;
-                color: #2c3e50;
-            }
-            .qr-container {
-                text-align: center;
-                margin: 20px 0;
-            }
-            .qr-container svg {
-                max-width: 250px;
-                height: auto;
-            }
-            button {
-                display: block;
-                margin: 10px auto;
-                padding: 10px 20px;
-                background: #3498db;
-                color: white;
-                border: none;
-                border-radius: 4px;
-                cursor: pointer;
-            }
-            button:hover {
-                background: #2980b9;
-            }
-            .notice {
-                background: #e3f2fd;
-                border: 1px solid #bbdefb;
-                color: #0d47a1;
-                padding: 12px;
-                margin: 20px 0;
-                border-radius: 4px;
-                text-align: center;
-                line-height: 1.5;
-            }
-            .connected {
-                background: #e8f5e9;
-                border: 1px solid #a5d6a7;
-                color: #1b5e20;
-                padding: 12px;
-                margin: 0 0 20px 0;
-                border-radius: 4px;
-                text-align: center;
-                font-weight: bold;
-                line-height: 1.5;
-            }
-            .notice-action {
-                background: #fff3cd;
-                border: 1px solid #ffe69c;
-                color: #664d03;
-                padding: 12px;
-                margin: 0 0 20px 0;
-                border-radius: 4px;
-                text-align: center;
-                font-weight: bold;
-                line-height: 1.5;
-            }
-            .status {
-                text-align: center;
-                font-weight: bold;
-                margin-top: 20px;
-            }
-            </style>
-        </head>
-        <body>
-            <h2>Connect to Nostr</h2>
-            ${noticeBannerHtml}
-            ${connectedBannerHtml}
-            <p style="text-align:center;">Scan this QR with Primal, Amber, Alby, Nostrum or any NIP-46 signer, or copy the URI:</p>
-            <div class="qr-container">
-            ${qrSvg}
-            </div>
-            <button id="copyUriBtn">
-            Copy URI
-            </button>
-
-            <div class="notice">
-            Connecting Nostr to Sattest allows you to create, claim, and approve bounties.
-            </div>
-
-            <p id="status" class="status">Waiting for approval in your signer app...</p>
-            <script nonce="${nonce}">
-              // Pass the URI as a JSON-encoded string literal (not HTML-escaped
-              // interpolation) so it can't break out of the JS string context.
-              const uri = ${JSON.stringify(connectionUri)};
-              document.getElementById('copyUriBtn').addEventListener('click', function() {
-                navigator.clipboard.writeText(uri).then(function() { alert('URI copied!'); });
-              });
-            </script>
-        </body>
-        </html>
-    `;
+  const qrHtml = renderConnectQr({ connectionUri, qrSvg, nonce, banners });
 
   // Paint a lightweight placeholder first. The QR is revealed by the resolver
   // *after* the signer-response subscription is live (the nostrconnect://
   // listener uses limit:0 — only new events — so a response that arrives before
   // the subscription is active is lost, which is the "have to connect twice"
   // bug). Keep the same banners for continuity.
-  panel.webview.html = `
-        <!DOCTYPE html>
-        <html lang="en">
-        <head>
-            <meta charset="UTF-8">
-            <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Connect to Nostr</title>
-            <style>
-            body { font-family: monospace; padding: 20px; background: #f5f5f5; color: #333; text-align: center; }
-            h2 { color: #2c3e50; }
-            .notice-action { background: #fff3cd; border: 1px solid #ffe69c; color: #664d03; padding: 12px; margin: 0 0 20px; border-radius: 4px; font-weight: bold; line-height: 1.5; }
-            .connected { background: #e8f5e9; border: 1px solid #a5d6a7; color: #1b5e20; padding: 12px; margin: 0 0 20px; border-radius: 4px; font-weight: bold; line-height: 1.5; }
-            .status { margin-top: 24px; color: #555; }
-            </style>
-        </head>
-        <body>
-            <h2>Connect to Nostr</h2>
-            ${noticeBannerHtml}
-            ${connectedBannerHtml}
-            <p class="status">Establishing secure connection…</p>
-        </body>
-        </html>
-    `;
+  panel.webview.html = renderConnectPlaceholder(banners);
 
   const nostrConnection = await resolveNostrInfoFromBunkerSigner(
     clientSecretBytes,
@@ -652,15 +484,6 @@ export async function resolveNostrInfoFromBunkerSigner(
   } finally {
     disposable.dispose();
   }
-}
-
-// Helper: hex to bytes
-function hexToBytes(hex: string): Uint8Array {
-  const bytes = new Uint8Array(hex.length / 2);
-  for (let i = 0; i < hex.length; i += 2) {
-    bytes[i / 2] = parseInt(hex.substr(i, 2), 16);
-  }
-  return bytes;
 }
 
 /**

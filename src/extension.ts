@@ -10,7 +10,12 @@ import {
 import { BountyInfo } from './bounty/bounty.types.js';
 import { BountyCodeLensProvider } from './bounty/bounty-code-lens.js';
 import { fetchBounties } from './api/bounty.api.js';
-import { findTestItemById, getRepoSlug, getLocalTestIds } from './test/test-item.util.js';
+import {
+  buildTestItemIndex,
+  findTestItemById,
+  getRepoSlug,
+  getLocalTestIds,
+} from './test/test-item.util.js';
 import { activateTestController, myTestController } from './test/test-controller.js';
 import { CustomTestItem } from './test/test-item-wrapper.js';
 import { connectNostr, refreshNostrHandleIfStale } from './api/nostr.api.js';
@@ -160,12 +165,15 @@ function attachTestItems(backendBounties: BountyInfo[], bounties: Map<string, Bo
   // last-write-wins, which left the *oldest* bounty in the map and made the
   // lens/claim/approve flows act on stale data.
   const seenThisBatch = new Set<string>();
+  // One walk of the test tree for the whole batch — resolving each bounty
+  // separately re-walked it per bounty.
+  const testItemIndex = buildTestItemIndex();
   backendBounties.forEach((b) => {
     if (seenThisBatch.has(b.testId)) {
       return;
     }
     seenThisBatch.add(b.testId);
-    const testItem = findTestItemById(b.testId) as CustomTestItem;
+    const testItem = findTestItemById(b.testId, testItemIndex) as CustomTestItem;
     if (testItem) {
       b.testItem = testItem;
     } else {

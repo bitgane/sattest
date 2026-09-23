@@ -4,6 +4,13 @@ import { BountyInfo, ClaimInfo, claimStatusPending, claimStatusApproved } from '
 
 jest.mock('../test/test-item.util', () => ({
   findTestItemById: jest.fn(),
+  // The provider builds one index per render and resolves every bounty against
+  // it; the mocked findTestItemById ignores it, so an empty map is enough.
+  buildTestItemIndex: jest.fn(() => new Map()),
+  testIdFilePath: (testId: string) => {
+    const hashIndex = testId.indexOf('#');
+    return hashIndex === -1 ? testId : testId.slice(0, hashIndex);
+  },
 }));
 
 import { findTestItemById } from '../test/test-item.util.js';

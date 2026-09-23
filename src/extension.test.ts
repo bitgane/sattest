@@ -51,6 +51,7 @@ jest.mock('./test/test-controller', () => {
 });
 
 jest.mock('./test/test-item.util', () => ({
+  buildTestItemIndex: jest.fn(() => new Map()),
   findTestItemById: jest.fn().mockReturnValue({
     id: 'test-1',
     label: 'test',
@@ -370,8 +371,8 @@ describe('extension', () => {
       const context = createMockContext();
       await activate(context);
 
-      expect(findTestItemById).toHaveBeenCalledWith('/test-1');
-      expect(findTestItemById).toHaveBeenCalledWith('/test-2');
+      expect(findTestItemById).toHaveBeenCalledWith('/test-1', expect.any(Map));
+      expect(findTestItemById).toHaveBeenCalledWith('/test-2', expect.any(Map));
     });
 
     it('handles missing test item in attachTestItems', async () => {

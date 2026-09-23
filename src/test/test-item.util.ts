@@ -58,28 +58,52 @@ export function getLocalTestIds(): string[] {
 }
 
 /**
- * Recursively searches the Test Controller's items for a TestItem with the given ID.
- * Returns the first matching item or undefined if not found.
+ * Flat `id → TestItem` index of the controller's whole tree, built in one pass.
+ *
+ * Callers that resolve more than one id (the code-lens render, the startup
+ * bounty attach) build this once and pass it to `findTestItemById`, turning what
+ * used to be a full tree walk *per bounty* into one walk plus O(1) lookups.
+ *
+ * Ids are unique by construction — a file item is keyed by its fsPath and a test
+ * item by `<fsPath>#<test name>` — so first-write-wins can never discard a
+ * different item than the old depth-first search would have returned.
  */
-export function findTestItemById(id: string): CustomTestItem {
-  function search(collection: vscode.TestItemCollection): vscode.TestItem | undefined {
-    let found: vscode.TestItem | undefined = undefined;
+export function buildTestItemIndex(): Map<string, vscode.TestItem> {
+  const index = new Map<string, vscode.TestItem>();
 
+  const visit = (collection: vscode.TestItemCollection): void => {
     collection.forEach((item) => {
-      if (id.trim() === item.id.trim()) {
-        found = item;
-        return; // early exit
+      const key = item.id.trim();
+      if (!index.has(key)) {
+        index.set(key, item);
       }
-
-      const childFound = search(item.children);
-      if (childFound) {
-        found = childFound;
-        return;
-      }
+      visit(item.children);
     });
-    return found;
-  }
-  const realItem = search(myTestController.items);
+  };
+
+  visit(myTestController.items);
+  return index;
+}
+
+/**
+ * Resolves a TestItem by ID and wraps it so callers get a stable
+ * `CustomTestItem` (the wrapper keeps the *original* backend id, which may carry
+ * a `#…` fragment the real item doesn't).
+ *
+ * Pass `index` when resolving several ids against the same tree — see
+ * `buildTestItemIndex`. Omitting it builds a throwaway index for this one
+ * lookup, which is what a single-shot caller wants.
+ *
+ * Note the previous implementation walked the tree with `collection.forEach` and
+ * a `return` it documented as an "early exit". `TestItemCollection.forEach` has
+ * no early exit, so that walk always traversed every item in the tree even after
+ * matching — the index replaces it outright.
+ */
+export function findTestItemById(
+  id: string,
+  index?: Map<string, vscode.TestItem>
+): CustomTestItem {
+  const realItem = (index ?? buildTestItemIndex()).get(id.trim());
 
   if (realItem) {
     // Create wrapper with original ID and real range (if any)
@@ -106,6 +130,18 @@ export function findTestItemById(id: string): CustomTestItem {
     undefined,
     new vscode.Range(0, 0, 0, 0) // dummy fallback range
   );
+}
+
+/**
+ * The workspace file path a bounty's testId refers to.
+ *
+ * Test ids are `<fsPath>#<test name>` (see `normalizedTestId`), so the portion
+ * before the `#` names the file. Returns '' when the id carries no usable path,
+ * which callers must treat as "unknown — don't skip it".
+ */
+export function testIdFilePath(testId: string): string {
+  const hashIndex = testId.indexOf('#');
+  return hashIndex === -1 ? testId : testId.slice(0, hashIndex);
 }
 
 export const workspaceRoot = () => {
