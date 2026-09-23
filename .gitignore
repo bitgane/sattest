@@ -16,6 +16,9 @@ dist/
 lib/
 build/
 
+# Packaged extension bundles — build artifacts, published via the Marketplace
+*.vsix
+
 # Test coverage reports
 coverage/
 .nyc_output/
