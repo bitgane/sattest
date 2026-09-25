@@ -184,6 +184,7 @@
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
+    "package:release": "node scripts/package-release.mjs",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "pretest": "npm run compile && npm run lint",

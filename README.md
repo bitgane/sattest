@@ -45,7 +45,7 @@ Sattest discovers tests in all major languages and frameworks:
 - VS Code 1.106+
 - A Nostr signer — Primal, Amber, nsec.app, or any NIP-46 remote signer ("bunker")
 - An NWC-capable Lightning wallet — Alby Hub, Coinos, Phoenix, Mutiny, etc.
-- A Sattest backend instance (defaults to the hosted instance; configurable via `sattest.backendUrl`). The backend is open source: [bitgane/sattest-backend](https://github.com/bitgane/sattest-backend)
+- A Sattest backend instance, set with `sattest.backendUrl`. Marketplace releases default to the hosted Sattest backend; builds from source default to `http://localhost:3000`. The backend is open source: [bitgane/sattest-backend](https://github.com/bitgane/sattest-backend)
 
 ## Installation
 
@@ -150,6 +150,14 @@ npm test
 
 ```bash
 npm run compile
+```
+
+### Packaging a release
+
+The repo's `sattest.backendUrl` default is `http://localhost:3000`. Release builds swap in the hosted URL at packaging time, and `package.json` is restored afterwards:
+
+```bash
+SATTEST_RELEASE_BACKEND_URL=https://… npm run package:release
 ```
 
 ### Running your own backend
