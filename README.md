@@ -45,7 +45,7 @@ Sattest discovers tests in all major languages and frameworks:
 - VS Code 1.106+
 - A Nostr signer — Primal, Amber, nsec.app, or any NIP-46 remote signer ("bunker")
 - An NWC-capable Lightning wallet — Alby Hub, Coinos, Phoenix, Mutiny, etc.
-- A Sattest backend instance (defaults to the hosted instance; configurable via `sattest.backendUrl`)
+- A Sattest backend instance (defaults to the hosted instance; configurable via `sattest.backendUrl`). The backend is open source: [bitgane/sattest-backend](https://github.com/bitgane/sattest-backend)
 
 ## Installation
 
@@ -68,7 +68,7 @@ move directly from your connected wallet to the claimant. If you run Add Bounty 
 connected, the connect flow launches automatically.
 
 > The custodial flow (LNbits invoice/QR, funds held server-side) is disabled by default. It's an
-> operator-gated option — see `ALLOW_CUSTODIAL_BOUNTIES` in the backend `.env.example`.
+> operator-gated option — see `ALLOW_CUSTODIAL_BOUNTIES` in the backend's [`.env.example`](https://github.com/bitgane/sattest-backend/blob/master/.env.example).
 
 ## Usage
 
@@ -110,7 +110,7 @@ connected, the connect flow launches automatically.
 
 ### Custodial mode (operator-gated, off by default)
 
-The original custodial flow — pay a BOLT11 invoice / QR up front, funds held server-side via LNbits, then **Check Bounty Paid** and refund-on-remove — is disabled by default. Operators can re-enable it with `ALLOW_CUSTODIAL_BOUNTIES=true` on the backend; see the backend `.env.example`.
+The original custodial flow — pay a BOLT11 invoice / QR up front, funds held server-side via LNbits, then **Check Bounty Paid** and refund-on-remove — is disabled by default. Operators can re-enable it with `ALLOW_CUSTODIAL_BOUNTIES=true` on the backend; see the backend's [`.env.example`](https://github.com/bitgane/sattest-backend/blob/master/.env.example).
 
 ## Commands
 
@@ -151,3 +151,11 @@ npm test
 ```bash
 npm run compile
 ```
+
+### Running your own backend
+
+The backend lives in its own repo, [bitgane/sattest-backend](https://github.com/bitgane/sattest-backend). Its README covers local setup. To point the extension at a local instance, set `sattest.backendUrl` to `http://localhost:3000` in your VS Code **user** settings. The setting is machine-scoped, so a workspace `settings.json` cannot change it.
+
+## License
+
+[MIT](LICENSE.md)
