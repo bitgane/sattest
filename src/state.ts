@@ -69,7 +69,7 @@ export async function setNostrAuthEvent(value: string): Promise<void> {
 
 // Bunker pointer (remote signer pubkey, relays, connect secret) — persisted so
 // money-moving calls can reconstruct a signer session and sign a fresh,
-// nonce-bound write credential per request (F4 hardening) without re-scanning
+// nonce-bound write credential per request without re-scanning
 // the connect QR every time.
 export async function getNostrBunkerPointer(): Promise<string | undefined> {
   return getContext().secrets.get(NOSTR_BUNKER_POINTER);

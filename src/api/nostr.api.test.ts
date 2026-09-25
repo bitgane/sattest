@@ -476,7 +476,7 @@ describe('resolveNostrInfoFromBunkerSigner', () => {
       userHandle: '@alice',
     });
 
-    // M3: the signed auth event is bound to the backend via a `relay` tag so a
+    // The signed auth event is bound to the backend via a `relay` tag so a
     // harvested credential can't be replayed against a different server.
     const signedArg = signEvent.mock.calls[0][0];
     expect(signedArg.kind).toBe(22242);
@@ -485,7 +485,7 @@ describe('resolveNostrInfoFromBunkerSigner', () => {
     expect(typeof relayTag[1]).toBe('string');
     expect(relayTag[1]).toMatch(/^https?:\/\//);
 
-    // Only the read credential is signed at connect time (F4: the write
+    // Only the read credential is signed at connect time (the write
     // credential is minted per money call, not cached — see signMoneyAuthEvent
     // below). Exactly one signEvent call happened here.
     expect(signEvent).toHaveBeenCalledTimes(1);
@@ -822,7 +822,7 @@ describe('resolveNostrInfoFromBunkerSigner', () => {
   });
 });
 
-// ── F4: per-money-call nonce-bound write credential ─────────────────────────
+// ── per-money-call nonce-bound write credential ─────────────────────────────
 describe('signMoneyAuthEvent', () => {
   const CLIENT_SECRET_HEX = 'ab'.repeat(32);
   const BUNKER_POINTER = {

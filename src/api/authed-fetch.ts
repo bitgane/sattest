@@ -12,7 +12,7 @@ import {
  * the backend rejects it (401) once it ages past its freshness window. Write
  * (money-moving) calls are never cached — each one fetches a fresh
  * server-issued nonce and signs a brand-new write-scope credential bound to
- * it (F4 hardening; see `nostr-auth.ts`), so a signer round-trip happens on
+ * it (see `nostr-auth.ts`), so a signer round-trip happens on
  * every money call. Either way, `authedFetch` can transparently trigger a
  * re-auth (reconnect to the signer) and retry once when the backend responds
  * 401 — e.g. because the read credential expired or no identity is connected

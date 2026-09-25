@@ -26,7 +26,7 @@ function originsMatch(a: string, b: string): boolean {
 /**
  * Consent gate before the NWC spending grant is transmitted.
  *
- * `sattest.backendUrl` is machine-scoped, so a repo can't redirect it (H1) — but
+ * `sattest.backendUrl` is machine-scoped, so a repo can't redirect it — but
  * the user themselves can point it at any https host, and the NWC URI is a
  * Lightning *spending* credential. This guards the social-engineering case
  * ("set your backendUrl to https://faster-sattest.example"): if the configured

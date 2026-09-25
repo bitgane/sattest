@@ -32,7 +32,7 @@ export async function getNostrAuthHeaders(
 }
 
 /**
- * Fetches a short-lived, single-use nonce from the backend (F4 hardening).
+ * Fetches a short-lived, single-use nonce from the backend.
  * Uses the cheap, reusable read credential — issuing a nonce never requires
  * a signer round-trip, only the money call that follows does.
  */
@@ -56,7 +56,7 @@ async function fetchAuthNonce(): Promise<string> {
  * Headers for money-moving endpoints (`moneyAuth` middleware).
  *
  * Unlike the read credential, this is NOT cached: `moneyAuth` requires a
- * server-issued, single-use nonce (F4 hardening), so every money-moving call
+ * server-issued, single-use nonce, so every money-moving call
  * fetches a fresh nonce and signs a brand-new write-scope credential
  * (`content: 'sattest-auth:write'`) bound to it. This costs a signer
  * round-trip per money call, in exchange for a captured write credential no

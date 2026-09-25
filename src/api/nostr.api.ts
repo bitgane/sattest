@@ -365,7 +365,7 @@ export async function resolveNostrInfoFromBunkerSigner(
     const bunkerPointer: BunkerPointer = { pubkey: remoteSignerPubkey, relays, secret };
     const bunker = BunkerSigner.fromBunker(clientSecretBytes, bunkerPointer, { pool });
 
-    // Persist the pointer (F4 hardening) so `signMoneyAuthEvent` can rebuild a
+    // Persist the pointer so `signMoneyAuthEvent` can rebuild a
     // signer session on demand for each money-moving call, without asking the
     // user to scan the connect QR again every time.
     await setNostrBunkerPointer(JSON.stringify(bunkerPointer));
@@ -415,7 +415,7 @@ export async function resolveNostrInfoFromBunkerSigner(
     }
 
     // Sign the read-scope auth credential for backend API authentication
-    // (NIP-42 kind 22242, M1 hardening). Signed once at connect time and
+    // (NIP-42 kind 22242). Signed once at connect time and
     // reused for the lifetime of its freshness window — reads are
     // non-destructive, so avoiding a signer round-trip on every read is worth
     // the bounded replay window (`content: 'sattest-auth'`, accepted by
@@ -423,7 +423,7 @@ export async function resolveNostrInfoFromBunkerSigner(
     //
     // The write-scope credential (`content: 'sattest-auth:write'`, required
     // by moneyAuth) is NOT signed here. Since moneyAuth requires a
-    // server-issued single-use nonce (F4 hardening), a write credential must
+    // server-issued single-use nonce, a write credential must
     // be signed fresh per money-moving call — see `signMoneyAuthEvent` below,
     // which reuses the persisted bunker pointer to do that on demand.
     //
@@ -532,8 +532,8 @@ export async function refreshNostrHandleIfStale(): Promise<string | undefined> {
 }
 
 /**
- * Signs a fresh write-scope NIP-42 auth event bound to `nonce` (F4
- * hardening). The backend's `moneyAuth` middleware requires a server-issued,
+ * Signs a fresh write-scope NIP-42 auth event bound to `nonce`.
+ * The backend's `moneyAuth` middleware requires a server-issued,
  * single-use nonce on every money-moving call, so — unlike the read
  * credential — this can't be signed once and cached; it's minted per call.
  *

@@ -62,7 +62,7 @@ describe('getNostrAuthHeaders', () => {
   });
 });
 
-describe('getNostrMoneyAuthHeaders (F4: nonce-bound write credential)', () => {
+describe('getNostrMoneyAuthHeaders (nonce-bound write credential)', () => {
   beforeEach(() => {
     (getNostrAuthEvent as jest.Mock).mockReset();
     (signMoneyAuthEvent as jest.Mock).mockReset();
