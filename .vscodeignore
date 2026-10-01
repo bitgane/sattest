@@ -1,0 +1,36 @@
+# Files left out of the packaged .vsix. The extension runs from out/ (compiled
+# JS), package.json, images/icon.png and its production node_modules — vsce adds
+# those itself. Everything else here is source, tooling or test-only.
+#
+# Careful with out/test/: despite the name it holds runtime code (the test
+# controller and language configs), so only *.test.js files are excluded.
+
+# Sources and type info — out/ is what runs
+src/**
+**/*.ts
+**/*.map
+tsconfig.json
+
+# Compiled tests and test scaffolding
+out/**/*.test.js
+out/__mocks__/**
+out/jest.setup.js
+
+# Tooling and config
+.github/**
+.idea/**
+.vscode/**
+.vscode-test/**
+.vscode-test.mjs
+.gitignore
+.prettierrc.json
+eslint.config.mjs
+jest.config.cjs
+scripts/**
+coverage/**
+
+# Not needed in the installed extension
+examples/**
+images/icon.svg
+vsc-extension-quickstart.md
+*.vsix
