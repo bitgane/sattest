@@ -1,0 +1,631 @@
+import * as vscode from 'vscode';
+import { BountyInfo, ClaimInfo } from '../bounty/bounty.types.js';
+import { normalizedTestId, workspaceRoot } from '../test/test-item.util.js';
+import { authedFetch } from './authed-fetch.js';
+import { getBackendUrl } from './config.js';
+import { createLnbitsInvoice } from './lnbits.api.js';
+import { SignerCancelledError } from './signer-errors.js';
+import { describeErrorResponse, handleApiError } from './api-error.js';
+
+export interface FetchBountiesOptions {
+  testId?: string;
+  includeInactive?: boolean;
+  repo?: string;
+  testIds?: string[];
+}
+
+// Extension activation fires multiple fetchBounties() calls in quick
+// succession (initial load + post-Test-Controller refresh). If the backend
+// is unreachable we don't want to spam the user with one toast per call —
+// track the last time we surfaced an error so we only toast once per window.
+let lastFetchErrorToastAt = 0;
+const FETCH_ERROR_TOAST_COOLDOWN_MS = 10_000;
+
+// The "this workspace isn't a git repo" notice is a stable fact about the
+// workspace, not a transient error — surface it once per session rather than
+// on every refresh.
+let warnedNoRepo = false;
+
+/** Reset the once-per-session notice. Test-only. */
+export function _resetRepoWarningForTests(): void {
+  warnedNoRepo = false;
+}
+
+// Backend's `/bounties/filter` rejects requests with more than this many test
+// IDs as a DoS guard. We respect it by chunking large workspaces into
+// successive requests and merging the results client-side.
+const FILTER_CHUNK_SIZE = 500;
+
+export async function fetchBounties(options: FetchBountiesOptions = {}): Promise<BountyInfo[]> {
+  const { testId, includeInactive = false, repo, testIds } = options;
+
+  // Git repo required — enforced here, at the single choke point every caller
+  // goes through, so a new call site can't quietly reintroduce an unscoped
+  // fetch. The backend rejects a missing scope with 400/REPO_REQUIRED anyway;
+  // this stops the request from being made at all, which is the point: an
+  // unscoped listing returns far more than any workspace needs and is the
+  // reconnaissance an attacker uses to time a competing claim.
+  if (!repo || !repo.trim()) {
+    if (!warnedNoRepo) {
+      warnedNoRepo = true;
+      vscode.window.showInformationMessage(
+        'Sattest needs a git repository with an "origin" remote — bounties are scoped per repo. ' +
+          'Open a folder that has one to see and create bounties.'
+      );
+    }
+    return [];
+  }
+
+  try {
+    // Large workspaces can blow past the per-request testIds cap. Split into
+    // chunks, fire them in parallel, and merge — de-duplicating by bounty id
+    // in case the backend ever returns the same bounty under multiple chunks
+    // (defense in depth; current schema makes that impossible).
+    if (testIds && testIds.length > FILTER_CHUNK_SIZE) {
+      const chunks: string[][] = [];
+      for (let i = 0; i < testIds.length; i += FILTER_CHUNK_SIZE) {
+        chunks.push(testIds.slice(i, i + FILTER_CHUNK_SIZE));
+      }
+      const results = await Promise.all(
+        chunks.map((chunk) =>
+          fetchBounties({ testId, includeInactive, repo, testIds: chunk })
+        )
+      );
+      const merged = new Map<string, BountyInfo>();
+      for (const list of results) {
+        for (const b of list) {
+          merged.set(b.id, b);
+        }
+      }
+      return Array.from(merged.values());
+    }
+
+    const usePost = testIds && testIds.length > 0;
+    const url = new URL(`${getBackendUrl()}/bounties${usePost ? '/filter' : ''}`);
+    if (testId) {
+      url.searchParams.append('testId', testId);
+    }
+    if (includeInactive) {
+      url.searchParams.append('includeInactive', 'true');
+    }
+    if (repo) {
+      url.searchParams.append('repo', repo);
+    }
+
+    const fetchOptions: RequestInit = usePost
+      ? {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ testIds }),
+        }
+      : {};
+
+    const response = await fetch(url, fetchOptions);
+
+    if (!response.ok) {
+      // Pull the backend's JSON error body so callers (and us, in the dev
+      // console) can see which validator rejected what — the bare status code
+      // is useless when /bounties/filter has multiple Zod rules.
+      let detail = '';
+      try {
+        const errBody = (await response.json()) as {
+          error?: string;
+          issues?: Array<{ field: string; message: string }>;
+        };
+        const issues = errBody.issues
+          ?.map((i) => `${i.field}: ${i.message}`)
+          .join('; ');
+        detail = issues
+          ? ` (${errBody.error ?? 'Validation failed'} — ${issues})`
+          : errBody.error
+            ? ` (${errBody.error})`
+            : '';
+      } catch {
+        /* body wasn't JSON */
+      }
+      throw new Error(
+        `[fetchBounties] Failed to fetch bounties: ${response.status}${detail} (url=${url.toString()}, method=${usePost ? 'POST' : 'GET'})`
+      );
+    }
+
+    const data = await response.json();
+    const backendBounties = data.bounties || [];
+    const rootPath = workspaceRoot();
+
+    backendBounties.forEach((b: BountyInfo) => {
+      if (b.testId.startsWith('/')) {
+        b.testId = rootPath + b.testId;
+      } else {
+        b.testId = rootPath + '/' + b.testId;
+      }
+      // Normalize: backend may omit `claims` for bounties with none. Downstream
+      // code (claim/approve handlers, code-lens) treats it as an array, so
+      // guarantee that contract here rather than scattering `?? []` checks.
+      if (!Array.isArray(b.claims)) {
+        b.claims = [];
+      }
+    });
+    return backendBounties;
+  } catch (error) {
+    console.error('[fetchBounties] Error fetching bounties:', error);
+    const now = Date.now();
+    if (now - lastFetchErrorToastAt > FETCH_ERROR_TOAST_COOLDOWN_MS) {
+      lastFetchErrorToastAt = now;
+      vscode.window.showErrorMessage('Failed to load bounties from backend');
+    }
+    return [];
+  }
+}
+
+// Fetch all bounties from backend (or filter by testId)
+export async function createBounty(
+  amountSats: number,
+  lnbitsUrl: string | undefined,
+  lnbitsApiKey: string | undefined,
+  test: vscode.TestItem,
+  creatorId: string | undefined,
+  repo?: string,
+  fundingMode: 'custodial' | 'nwc' = 'nwc'
+): Promise<BountyInfo | undefined> {
+  try {
+    let invoiceForApi = '';
+    let paymentHashForApi = '';
+    const memo = `Bounty for test "${test.label}"`;
+    // NWC bounties are funded from the creator's own wallet on approval, so
+    // there's no up-front LNbits invoice to mint.
+    if (fundingMode === 'custodial' && !lnbitsUrl && lnbitsApiKey) {
+      const { payment_request: invoice, payment_hash } = await createLnbitsInvoice(
+        lnbitsUrl as string,
+        lnbitsApiKey as string,
+        amountSats,
+        memo
+      );
+      invoiceForApi = invoice;
+      paymentHashForApi = payment_hash;
+    }
+
+    const response = await authedFetch(`${getBackendUrl()}/bounties`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        testId: normalizedTestId(test),
+        frontEndInvoice: invoiceForApi,
+        frontEndPaymentHash: paymentHashForApi,
+        amountSats: amountSats,
+        creatorId: creatorId,
+        memo,
+        // Tagging the bounty with the workspace's git repo slug lets the
+        // backend serve per-repo listings to unauthenticated clients. Omitted
+        // when the workspace has no configured git remote.
+        ...(repo ? { repo } : {}),
+        // Only forward a non-default fundingMode — keeps the wire format
+        // backward-compatible with older backends that don't know the field.
+        ...(fundingMode !== 'custodial' ? { fundingMode } : {}),
+      }),
+    }, { interactiveReauth: true, scope: 'write', operation: 'bounty creation' });
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(errorData.message || `Backend error: ${response.status}`);
+    }
+
+    const newBounty = await response.json();
+    // Same normalization as fetchBounties — a fresh bounty has no claims and
+    // the backend omits the field. Guarantee an empty array so callers can
+    // safely index `.claims[0]`.
+    if (newBounty && !Array.isArray(newBounty.claims)) {
+      newBounty.claims = [];
+    }
+    return newBounty;
+  } catch (error) {
+    // User cancelled the signer wait — quiet, intentional abort, no error toast.
+    if (error instanceof SignerCancelledError) {
+      return;
+    }
+    console.error('[fetchBounties] Error creating bounty:', error);
+    vscode.window.showErrorMessage('Failed to create bounty in backend');
+    return;
+  }
+}
+
+/**
+ * Checks with Lnbits to see if the invoice has been paid
+ * @param paymentHash - the invoice hash of the bounty payment
+ * @returns true if invoice has been paid, false otherwise
+ */
+export async function checkPaidStatus(paymentHash: string): Promise<boolean | undefined> {
+  try {
+    const response = await authedFetch(
+      `${getBackendUrl()}/bounties/${encodeURIComponent(paymentHash)}/check-paid`,
+      {
+        method: 'GET',
+        headers: { 'Content-Type': 'application/json' },
+      }
+    );
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => 'Unknown error');
+      throw new Error(`Backend update failed: ${response.status} - ${errorText}`);
+    }
+
+    const checkPaidResponse = await response.json();
+    return checkPaidResponse.paid;
+  } catch (error) {
+    console.error('[checkPaid] Error checkings paid status:', error);
+    return false;
+  }
+}
+
+/**
+ * Updates the invoicePaid status for a specific bounty on the backend.
+ * @param id - bounty unique ID
+ * @returns true if update succeeded, false otherwise
+ */
+export async function updatePaidStatus(id: string): Promise<boolean> {
+  try {
+    const response = await authedFetch(
+      `${getBackendUrl()}/bounties/${encodeURIComponent(id)}/update-paid`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+      },
+      { interactiveReauth: true, scope: 'write', operation: 'payment sync' }
+    );
+
+    if (!response.ok) {
+      throw new Error(
+        await describeErrorResponse(response, `Backend update failed: ${response.status}`)
+      );
+    }
+
+    return true;
+  } catch (error) {
+    handleApiError(error, {
+      scope: 'updatePaidStatus',
+      userMessage: 'Failed to sync payment status',
+    });
+    return false;
+  }
+}
+
+/**
+ * Submits a claim request to the backend for a bounty using the claimer's LNURL.
+ * @param id - The bounty ID (UUID from the bounties table)
+ * @param lnurl - The claimer's LNURL (withdrawal link)
+ * @param hideLnurl - When true, ask the backend to keep this payout destination
+ *   private: it's still stored and paid, but never disclosed to the bounty
+ *   creator/approver. Omitted from the wire when false to stay backward-compatible.
+ * @returns The updated bounty info if successful, null on failure
+ */
+export async function claimBountyWithLnAddress(
+  id: string,
+  lnurl: string,
+  hideLnurl: boolean = false
+): Promise<ClaimInfo | null> {
+  try {
+    const claimResponse = await authedFetch(
+      `${getBackendUrl()}/bounties/${encodeURIComponent(id)}/claim`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          lnurl: lnurl.trim(),
+          ...(hideLnurl ? { hideLnurl: true } : {}),
+        }),
+      },
+      { interactiveReauth: true, scope: 'write', operation: 'claim' }
+    );
+
+    if (!claimResponse.ok) {
+      throw new Error(
+        await describeErrorResponse(claimResponse, `Claim failed: ${claimResponse.status}`)
+      );
+    }
+
+    const updatedClaim = await claimResponse.json();
+
+    return updatedClaim;
+  } catch (error) {
+    handleApiError(error, { scope: 'claimBounty', userMessage: 'Failed to claim bounty' });
+    return null;
+  }
+}
+
+/**
+ * Resolves an LNURL/LN-address and returns its sendable bounds (millisats) so
+ * the claim input box can pre-check that the bounty amount fits the destination
+ * wallet. Reuses the backend's `checkValidLnurl` resolver via POST /lnurl/limits.
+ *
+ * Fails open: returns `null` on any non-OK response or network error. Callers
+ * must treat `null` as "couldn't determine" and not block — the backend claim
+ * endpoint remains the authoritative range check.
+ */
+export async function getLnurlLimits(
+  lnurl: string
+): Promise<{ minSendable: number; maxSendable: number } | null> {
+  try {
+    const response = await authedFetch(`${getBackendUrl()}/lnurl/limits`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ lnurl: lnurl.trim() }),
+    });
+    if (!response.ok) {
+      return null;
+    }
+    const data = (await response.json()) as { minSendable: number; maxSendable: number };
+    if (typeof data?.minSendable !== 'number' || typeof data?.maxSendable !== 'number') {
+      return null;
+    }
+    return { minSendable: data.minSendable, maxSendable: data.maxSendable };
+  } catch (error) {
+    console.error('[getLnurlLimits] Error:', error);
+    return null;
+  }
+}
+
+export interface DeactivateBountyResult {
+  success: boolean;
+  refund?: { checkingId: string; amountSats: number };
+}
+
+/**
+ * Deactivates a bounty. If `refundLnurl` is supplied, the backend  will 
+ * also fire a refund payout to that LNURL/LN-address before deactivating.
+ * @param bountyId - The bounty UUID
+ * @param refundLnurl - Optional LNURL/LN-address to refund the funded amount to
+ * @returns { success, refund? } — `refund` populated only when a payout fired
+ */
+export async function deactivateBounty(
+  bountyId: string,
+  refundLnurl?: string
+): Promise<DeactivateBountyResult> {
+  try {
+    const init: RequestInit = {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+    };
+    if (refundLnurl) {
+      init.body = JSON.stringify({ refundLnurl });
+    }
+
+    const response = await authedFetch(
+      `${getBackendUrl()}/bounties/${encodeURIComponent(bountyId)}/deactivate`,
+      init,
+      { interactiveReauth: true, scope: 'write', operation: 'bounty removal' }
+    );
+
+    if (!response.ok) {
+      // Prefers the dev-mode `message` (real exception text) over the generic
+      // `error` ("Failed to deactivate bounty") so the user sees what actually
+      // went wrong instead of a tautology.
+      throw new Error(
+        await describeErrorResponse(response, `Deactivation failed: ${response.status}`)
+      );
+    }
+
+    const data = (await response.json().catch(() => ({}))) as {
+      success?: boolean;
+      refund?: { checkingId: string; amountSats: number };
+    };
+
+    return {
+      success: data.success ?? true,
+      refund: data.refund,
+    };
+  } catch (error) {
+    handleApiError(error, {
+      scope: 'deactivateBounty',
+      userMessage: 'Failed to deactivate bounty',
+    });
+    return { success: false };
+  }
+}
+
+export interface PendingClaim {
+  id: string;
+  claimantLnurl: string | null;
+  /**
+   * Authenticated Nostr pubkey of the claimant. This — not the LNURL — is what
+   * ties a claim to the contributor the creator vetted out-of-band, so it stays
+   * visible even when the claimant hid their payout address. `null` only for
+   * legacy claims filed before the backend recorded identity.
+   */
+  claimantPubkey: string | null;
+  claimedAt: string;
+  status: string;
+  lnurlHidden: boolean;
+}
+
+/**
+ * Retrieves the open claims on a bounty so the creator can review who is being
+ * paid, and where, before confirming. Only the bounty creator can call this;
+ * returns an empty array when there is no open claim or the request fails.
+ *
+ * Returns ALL open claims, not just the newest. The backend used to pick the
+ * newest for us, which meant the payout recipient was chosen by an ordering an
+ * attacker controls: file a claim after the real contributor and you become the
+ * one the creator approves. Only the creator can say which claim corresponds to
+ * the work they reviewed, so the choice belongs to them.
+ */
+export async function getPendingClaims(bountyId: string): Promise<PendingClaim[]> {
+  try {
+    const response = await authedFetch(
+      `${getBackendUrl()}/bounties/${encodeURIComponent(bountyId)}/pending-claim`,
+      { method: 'GET' }
+    );
+    if (!response.ok) {
+      return [];
+    }
+    const data = await response.json();
+
+    // Newer backends send `claims[]`; older ones send a single claim at the top
+    // level. Normalize both into the array shape.
+    const raw = Array.isArray(data?.claims) ? data.claims : data?.id ? [data] : [];
+
+    // A private claim intentionally omits `claimantLnurl` (the backend redacts
+    // it), so only require `id` — that's what binds the approval.
+    return raw
+      .filter((c: { id?: string }) => Boolean(c?.id))
+      .map((c: Record<string, unknown>) => ({
+        id: c.id as string,
+        claimantLnurl: (c.claimantLnurl as string | undefined) ?? null,
+        claimantPubkey: (c.claimantPubkey as string | undefined) ?? null,
+        claimedAt: c.claimedAt as string,
+        status: c.status as string,
+        lnurlHidden: c.lnurlHidden === true,
+      }));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Approves a pending claim on a bounty by calling the backend approve endpoint.
+ * `claimId` must be the UUID of the specific claim the creator reviewed — the
+ * backend rejects any mismatch to prevent claim front-running (an attacker
+ * submitting a later claim to redirect the payout to their own LNURL).
+ * @param bountyId  - The bounty UUID
+ * @param claimId   - The specific claim UUID to approve (from getPendingClaim)
+ * @returns
+ *   - `BountyInfo` on a fresh successful approval,
+ *   - `'already-approved'` when the backend reports this claim was already paid
+ *     (a duplicate/concurrent approve — benign, the payout happened),
+ *   - `'in-progress'` when another approve is currently handling this claim,
+ *   - `null` on a genuine failure (an error toast was already shown) or user cancel.
+ */
+export type ApproveClaimResult =
+  | BountyInfo
+  | 'already-approved'
+  | 'in-progress'
+  | 'outcome-unknown'
+  | 'needs-confirmation'
+  | 'claimant-changed'
+  | null;
+
+export async function approveClaim(
+  bountyId: string,
+  claimId: string,
+  claimantPubkey?: string | null
+): Promise<ApproveClaimResult> {
+  try {
+    const response = await authedFetch(
+      `${getBackendUrl()}/bounties/${encodeURIComponent(bountyId)}/approve`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        // `claimantPubkey` names who we believe we're paying. The backend
+        // refuses to pay when several claims are open and no claimant is
+        // named, and rejects a mismatch — so a claim substituted between the
+        // creator's review and their click can't be paid by accident.
+        body: JSON.stringify({ claimId, ...(claimantPubkey ? { claimantPubkey } : {}) }),
+      },
+      { interactiveReauth: true, scope: 'write', operation: 'payout approval' }
+    );
+
+    if (!response.ok) {
+      let errorMessage = `Approval failed: ${response.status}`;
+      let code: string | undefined;
+      try {
+        const errorData = await response.json();
+        code = errorData.code;
+        // The NWC payout failure (502) returns the real reason in `error`
+        // (e.g. "reply timeout", "wallet offline", "insufficient budget").
+        // The generic 500 puts dev-mode detail in `message`. Prefer whichever
+        // is actually informative so the user sees *why* it failed, not just
+        // "Approval failed: 502".
+        const detail =
+          errorData.message && errorData.message !== 'Internal server error'
+            ? errorData.message
+            : errorData.error;
+        errorMessage = detail || errorMessage;
+      } catch {
+        // Ignore JSON parse error if response is not JSON
+      }
+
+      // A duplicate/concurrent approve (double-click, second window) is not a
+      // real failure — the first one already paid out (or is paying). Report it
+      // benignly so the caller never shows "Failed" next to the success toast.
+      if (code === 'CLAIM_ALREADY_APPROVED') {
+        return 'already-approved';
+      }
+      if (code === 'CLAIM_IN_PROGRESS') {
+        return 'in-progress';
+      }
+      // The payout was sent to the wallet but never confirmed back. It may
+      // have gone through — reporting this as a plain failure would invite a
+      // retry, and a retry pays a second invoice. The backend keeps the claim
+      // locked and reconciles it; the caller just has to say so honestly.
+      if (code === 'PAYOUT_OUTCOME_UNKNOWN') {
+        console.warn('[approveClaim] payout outcome unknown:', errorMessage);
+        return 'outcome-unknown';
+      }
+      // No wallet can ever report on this attempt — the wallet that made it is
+      // no longer the one connected. Re-checking will never resolve it, so the
+      // caller must offer the creator the manual confirmation instead of
+      // looping on a lookup that cannot succeed.
+      if (code === 'PAYOUT_NEEDS_CONFIRMATION') {
+        console.warn('[approveClaim] payout needs manual confirmation:', errorMessage);
+        return 'needs-confirmation';
+      }
+      // The set of claims moved under us between review and approve, or the
+      // claim we named belongs to someone else. Not a failure to retry blindly
+      // — the creator has to look again at who they're paying.
+      if (
+        code === 'MULTIPLE_OPEN_CLAIMS' ||
+        code === 'CLAIMANT_MISMATCH' ||
+        code === 'CLAIMANT_UNVERIFIABLE'
+      ) {
+        console.warn(`[approveClaim] claimant binding rejected (${code}):`, errorMessage);
+        vscode.window.showWarningMessage(errorMessage);
+        return 'claimant-changed';
+      }
+
+      throw new Error(errorMessage);
+    }
+
+    const updatedBounty = await response.json();
+    return updatedBounty;
+  } catch (error) {
+    handleApiError(error, { scope: 'approveClaim', userMessage: 'Failed to approve claim' });
+    return null;
+  }
+}
+
+/**
+ * Record the creator's own verdict on a payout that no wallet can report on.
+ *
+ * Only reachable after the backend has said `PAYOUT_NEEDS_CONFIRMATION` — i.e.
+ * the wallet that made the attempt is no longer connected, so there is nothing
+ * left to query. `'paid'` closes the claim out without a second payment;
+ * `'not-paid'` unlocks it so the payout can be retried from the current wallet.
+ *
+ * Returns true when the claim was resolved.
+ */
+export async function resolveHeldClaim(
+  bountyId: string,
+  claimId: string,
+  outcome: 'paid' | 'not-paid'
+): Promise<boolean> {
+  try {
+    const response = await authedFetch(
+      `${getBackendUrl()}/bounties/${encodeURIComponent(bountyId)}/claims/${encodeURIComponent(
+        claimId
+      )}/resolve`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ outcome }),
+      },
+      { interactiveReauth: true, scope: 'write', operation: 'payout confirmation' }
+    );
+
+    if (!response.ok) {
+      throw new Error(
+        await describeErrorResponse(response, `Resolve failed: ${response.status}`)
+      );
+    }
+    return true;
+  } catch (error) {
+    handleApiError(error, { scope: 'resolveHeldClaim', userMessage: 'Failed to resolve claim' });
+    return false;
+  }
+}
