@@ -194,26 +194,31 @@
     "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,md}\""
   },
   "devDependencies": {
-    "@types/jest": "^29.5.14",
+    "@types/jest": "^30.0.0",
     "@types/node": "22.x",
     "@types/node-fetch": "^2.6.13",
     "@types/qrcode": "^1.5.6",
     "@types/qrcode-svg": "^1.1.5",
     "@types/vscode": "^1.106.0",
-    "@vscode/test-cli": "^0.0.12",
+    "@vscode/test-cli": "^0.0.15",
     "@vscode/test-electron": "^2.5.2",
     "eslint": "^9.39.1",
-    "jest": "^29.7.0",
+    "jest": "^30.5.2",
     "prettier": "^3.8.1",
     "ts-jest": "^29.4.6",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.48.1"
   },
   "dependencies": {
-    "bolt11": "^1.4.1",
     "node-fetch": "^3.3.2",
     "nostr-tools": "^2.23.1",
     "qrcode": "^1.5.4",
     "qrcodejs": "^1.0.0"
+  },
+  "overrides": {
+    "mocha": {
+      "serialize-javascript": "^7.0.5",
+      "diff": "^8.0.3"
+    }
   }
 }
