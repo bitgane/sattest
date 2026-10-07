@@ -31,7 +31,6 @@ Thumbs.db
 
 # Editor / OS files
 .vscode-test/
-.vscodeignore
 .eslintcache
 .prettiercache
 
