@@ -66,6 +66,7 @@ import {
   resolveNostrInfoFromBunkerSigner,
   signMoneyAuthEvent,
 } from './nostr.api.js';
+import { waitForSignerHandshake } from './nostr-signer.js';
 import { BunkerSigner } from 'nostr-tools/nip46';
 import { SimplePool, nip44 } from 'nostr-tools';
 import { getNostrClientSecret, getNostrBunkerPointer } from '../state.js';
@@ -322,13 +323,15 @@ describe('resolveNostrInfoFromBunkerSigner', () => {
   let mockContext: vscode.ExtensionContext;
 
   beforeEach(() => {
-    mockPanel = {
-      webview: {
-        html: '<p id="status" class="status">Waiting...</p>',
-        onDidReceiveMessage: jest.fn().mockReturnValue({ dispose: jest.fn() }),
-      },
-      dispose: jest.fn(),
-    };
+    // A panel from the shared mock, so it has a real lifecycle: disposing it
+    // fires onDidDispose, and the global teardown closes it after each test.
+    mockPanel = vscode.window.createWebviewPanel(
+      'nostrConnect',
+      'Connect to Nostr',
+      vscode.ViewColumn.Beside,
+      {}
+    );
+    mockPanel.webview.html = '<p id="status" class="status">Waiting...</p>';
     mockPool = new SimplePool(); // the shared singleton
     mockContext = {
       secrets: {
@@ -570,6 +573,36 @@ describe('resolveNostrInfoFromBunkerSigner', () => {
       expect(mockPanel.dispose).not.toHaveBeenCalled();
       jest.advanceTimersByTime(1);
       expect(mockPanel.dispose).toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('cancels the pending auto-close when the panel is closed first', async () => {
+    jest.useFakeTimers();
+    try {
+      const mockBunker = {
+        getPublicKey: jest.fn().mockResolvedValue('pk'),
+        signEvent: jest.fn().mockResolvedValue({ kind: 22242, sig: 'fake-sig' }),
+      };
+      (BunkerSigner.fromBunker as jest.Mock).mockReturnValue(mockBunker);
+      handshakeSucceeds();
+
+      await resolveNostrInfoFromBunkerSigner(
+        new Uint8Array(32),
+        'nostr+connect://test?secret=s3cr3t',
+        ['wss://relay.test.com'],
+        mockPool,
+        mockContext,
+        mockPanel,
+        undefined, // revealQr
+        0 // settleMs: skip the relay-settle delay in unit tests
+      );
+      expect(jest.getTimerCount()).toBe(1); // the auto-close, waiting
+
+      mockPanel.dispose(); // the user closes it before then
+
+      expect(jest.getTimerCount()).toBe(0);
     } finally {
       jest.useRealTimers();
     }
@@ -1064,5 +1097,32 @@ describe('refreshNostrHandleIfStale', () => {
     pool.get.mockRejectedValue(new Error('relay down'));
 
     await expect(refreshNostrHandleIfStale()).resolves.toBeUndefined();
+  });
+});
+
+describe('waitForSignerHandshake', () => {
+  afterEach(() => {
+    sharedPool.subscribe.mockReset().mockReturnValue({ close: jest.fn() });
+  });
+
+  it('rejects at once, leaving no timer behind, when the subscription cannot start', async () => {
+    jest.useFakeTimers();
+    try {
+      handshakeFails(new Error('relay refused the subscription'));
+
+      await expect(
+        waitForSignerHandshake(
+          sharedPool as unknown as SimplePool,
+          ['wss://relay.test.com'],
+          new Uint8Array(32),
+          'client-pubkey',
+          's3cr3t'
+        )
+      ).rejects.toThrow('relay refused the subscription');
+      // The 90s handshake timeout used to stay armed after subscribing threw.
+      expect(jest.getTimerCount()).toBe(0);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });

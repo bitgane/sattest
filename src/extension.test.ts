@@ -62,8 +62,22 @@ jest.mock('./test/test-item.util', () => ({
   workspaceRoot: jest.fn().mockReturnValue('/mock/workspace'),
 }));
 
+/** Every context handed out below, so each test's activation can be torn down after it. */
+const createdContexts: vscode.ExtensionContext[] = [];
+
+afterEach(() => {
+  // Dispose what activate() registered, as VS Code does on deactivation. Its
+  // startup poll (a 2s interval, stopped after 30s) would otherwise outlive the
+  // test and hold Jest open for half a minute.
+  for (const context of createdContexts.splice(0)) {
+    for (const subscription of context.subscriptions) {
+      (subscription as vscode.Disposable | undefined)?.dispose?.();
+    }
+  }
+});
+
 function createMockContext(): vscode.ExtensionContext {
-  return {
+  const context = {
     globalState: {
       get: jest.fn().mockReturnValue(undefined),
       update: jest.fn().mockResolvedValue(undefined),
@@ -82,6 +96,8 @@ function createMockContext(): vscode.ExtensionContext {
     globalStoragePath: '',
     logPath: '',
   } as unknown as vscode.ExtensionContext;
+  createdContexts.push(context);
+  return context;
 }
 
 /**

@@ -1034,6 +1034,39 @@ describe('checkPaidCommand', () => {
     );
   });
 
+  it('polls for payment while the invoice panel is open, and stops once it closes', async () => {
+    jest.useFakeTimers();
+    try {
+      const bounties = new Map<string, BountyInfo>();
+      bounties.set('test-id', {
+        id: 'bounty-uuid',
+        amountSats: 5000,
+        paymentHash: 'hash123',
+        invoice: 'lnbc5000...',
+        testId: 'test-id',
+        invoicePaid: false,
+      } as BountyInfo);
+      (checkPaidStatus as jest.Mock).mockResolvedValue(false);
+
+      checkPaidCommand(bounties, { fire: jest.fn() } as any, createMockContext());
+      await capturedHandler!(createMockTestItem({ id: 'test-id' }));
+
+      (checkPaidStatus as jest.Mock).mockClear();
+      await jest.advanceTimersByTimeAsync(10_000);
+      expect(checkPaidStatus).toHaveBeenCalledTimes(1);
+
+      const panel = (vscode.window.createWebviewPanel as jest.Mock).mock.results[0].value;
+      panel.dispose();
+      (checkPaidStatus as jest.Mock).mockClear();
+      await jest.advanceTimersByTimeAsync(60_000);
+
+      expect(checkPaidStatus).not.toHaveBeenCalled();
+      expect(jest.getTimerCount()).toBe(0);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it('handles check-paid error gracefully', async () => {
     const bounties = new Map<string, BountyInfo>();
     bounties.set('test-id', {
