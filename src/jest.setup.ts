@@ -75,6 +75,12 @@ jest.mock('vscode', () => {
     },
     onDidOpenTextDocument: jest.fn().mockReturnValue({ dispose: jest.fn() }),
     getConfiguration: jest.fn().mockReturnValue(mockConfiguration),
+    // Untitled documents, e.g. the claim diff the approve flow opens for review.
+    openTextDocument: jest.fn().mockImplementation(async (options: any) => ({
+      uri: { scheme: 'untitled', fsPath: 'Untitled-1' },
+      getText: () => options?.content ?? '',
+      languageId: options?.language,
+    })),
   };
 
   const testItemChildren = new Map();
@@ -145,6 +151,7 @@ jest.mock('vscode', () => {
       showQuickPick: jest.fn().mockResolvedValue(undefined),
       showErrorMessage: jest.fn().mockResolvedValue(undefined),
       showWarningMessage: jest.fn().mockResolvedValue(undefined),
+      showTextDocument: jest.fn().mockResolvedValue(undefined),
       visibleTextEditors: [],
       onDidChangeActiveTextEditor: jest.fn().mockReturnValue({ dispose: jest.fn() }),
       // Runs the task immediately with a stub progress reporter and returns its

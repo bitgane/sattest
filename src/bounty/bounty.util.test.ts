@@ -1584,6 +1584,27 @@ describe('approveClaimCommand', () => {
       expect(approveClaimApi).toHaveBeenCalled();
     });
 
+    it('reviewing the changes keeps the claim the creator picked', async () => {
+      (vscode.window.showQuickPick as jest.Mock).mockImplementation(async (items: any[]) =>
+        items.find((i) => i.claim.id === MOCK_CLAIM_ID)
+      );
+      (vscode.window.showWarningMessage as jest.Mock)
+        .mockResolvedValueOnce('Review changes')
+        .mockResolvedValueOnce('Yes, Approve Payout');
+      (vscode.window.showInformationMessage as jest.Mock).mockResolvedValueOnce('Approve & Pay…');
+
+      approveClaimCommand(bountyWithPendingClaim(), { fire: jest.fn() } as any);
+      await capturedHandler!(createMockTestItem({ id: 'test-id' }));
+
+      // Not asked to pick again, and the payout stays bound to that pick.
+      expect(vscode.window.showQuickPick).toHaveBeenCalledTimes(1);
+      expect(approveClaimApi).toHaveBeenCalledWith(
+        'bounty-uuid',
+        MOCK_CLAIM_ID,
+        MOCK_CLAIMANT_PUBKEY
+      );
+    });
+
     it('does not pay when the backend reports the claimant changed', async () => {
       (vscode.window.showQuickPick as jest.Mock).mockImplementation(async (items: any[]) => items[1]);
       (approveClaimApi as jest.Mock).mockResolvedValue('claimant-changed');
@@ -1811,15 +1832,19 @@ describe('approveClaimCommand', () => {
 
     const bounties = nwcBounty();
     const mockEmitter = { fire: jest.fn() } as any;
-    // 1st warning = the approve confirm; 2nd = the connect-wallet prompt.
+    // 1st warning = the connect-wallet prompt; 2nd = the approve confirm. The
+    // wallet is checked first, so "pay" is never asked before it can happen.
     (vscode.window.showWarningMessage as jest.Mock)
-      .mockResolvedValueOnce('Yes, Approve Payout')
-      .mockResolvedValueOnce('Connect Wallet');
+      .mockResolvedValueOnce('Connect Wallet')
+      .mockResolvedValueOnce('Yes, Approve Payout');
     (approveClaimApi as jest.Mock).mockResolvedValue({ id: 'bounty-uuid', claims: [{ status: 'approved' }] });
 
     approveClaimCommand(bounties, mockEmitter);
     await capturedHandler!(createMockTestItem({ id: 'test-id' }));
 
+    const warnCalls = (vscode.window.showWarningMessage as jest.Mock).mock.calls;
+    expect(warnCalls[0][0]).toMatch(/isn't connected/);
+    expect(warnCalls[1][1]).toEqual(expect.objectContaining({ modal: true }));
     expect(vscode.commands.executeCommand).toHaveBeenCalledWith('sattest.connectWallet');
     expect(approveClaimApi).toHaveBeenCalledWith('bounty-uuid', MOCK_CLAIM_ID, MOCK_CLAIMANT_PUBKEY);
     expect(vscode.window.showInformationMessage).toHaveBeenCalledWith(
@@ -1834,15 +1859,19 @@ describe('approveClaimCommand', () => {
 
     const bounties = nwcBounty();
     const mockEmitter = { fire: jest.fn() } as any;
-    (vscode.window.showWarningMessage as jest.Mock)
-      .mockResolvedValueOnce('Yes, Approve Payout')
-      .mockResolvedValueOnce('Cancel'); // declines the connect prompt
+    (vscode.window.showWarningMessage as jest.Mock).mockResolvedValueOnce('Cancel'); // declines the connect prompt
 
     approveClaimCommand(bounties, mockEmitter);
     await capturedHandler!(createMockTestItem({ id: 'test-id' }));
 
     expect(vscode.commands.executeCommand).not.toHaveBeenCalledWith('sattest.connectWallet');
     expect(approveClaimApi).not.toHaveBeenCalled();
+    // The payout confirm was never shown: the creator wasn't asked to say
+    // "pay" for a payout that couldn't be sent.
+    expect(vscode.window.showWarningMessage).toHaveBeenCalledTimes(1);
+    expect((vscode.window.showWarningMessage as jest.Mock).mock.calls[0][0]).toMatch(
+      /isn't connected/
+    );
   });
 
   it('wallet still not connected after the connect attempt → warns, no approve call', async () => {
@@ -1852,9 +1881,7 @@ describe('approveClaimCommand', () => {
 
     const bounties = nwcBounty();
     const mockEmitter = { fire: jest.fn() } as any;
-    (vscode.window.showWarningMessage as jest.Mock)
-      .mockResolvedValueOnce('Yes, Approve Payout')
-      .mockResolvedValueOnce('Connect Wallet');
+    (vscode.window.showWarningMessage as jest.Mock).mockResolvedValueOnce('Connect Wallet');
 
     approveClaimCommand(bounties, mockEmitter);
     await capturedHandler!(createMockTestItem({ id: 'test-id' }));
@@ -1864,5 +1891,123 @@ describe('approveClaimCommand', () => {
     expect(vscode.window.showWarningMessage).toHaveBeenCalledWith(
       expect.stringContaining('still not connected')
     );
+    const modals = (vscode.window.showWarningMessage as jest.Mock).mock.calls.filter(
+      ([, options]) => options?.modal
+    );
+    expect(modals).toHaveLength(0);
+  });
+
+  // ── Reviewing the claimant's changes ─────────────────────────────────────
+  //
+  // A modal blocks the whole window, so the payout confirm must never sit on
+  // top of the diff it asks the creator to judge.
+  function reviewableBounty() {
+    const bounties = new Map<string, BountyInfo>();
+    bounties.set('test-id', {
+      id: 'bounty-uuid',
+      amountSats: 10000,
+      testId: 'test-id',
+      creatorId: 'creator-pubkey',
+      claims: [{ status: 'pending' as ClaimStatus }],
+    } as BountyInfo);
+    return bounties;
+  }
+
+  it('"Review changes" opens the diff and does not reopen the confirm over it', async () => {
+    (getNostrUserPubkey as jest.Mock).mockResolvedValue('creator-pubkey');
+    (vscode.window.showWarningMessage as jest.Mock).mockResolvedValueOnce('Review changes');
+    (vscode.window.showInformationMessage as jest.Mock).mockResolvedValueOnce('Not now');
+
+    approveClaimCommand(reviewableBounty(), { fire: jest.fn() } as any);
+    await capturedHandler!(createMockTestItem({ id: 'test-id' }));
+
+    // The patch is on screen…
+    expect(vscode.workspace.openTextDocument).toHaveBeenCalledWith(
+      expect.objectContaining({ language: 'diff', content: expect.stringContaining('+fixed') })
+    );
+    expect(vscode.window.showTextDocument).toHaveBeenCalled();
+    // …with a non-modal way back to the decision, and no second modal on top.
+    expect(vscode.window.showInformationMessage).toHaveBeenCalledWith(
+      'Reviewing the claim on "should do something": 10000 sats to lightning@example.com.',
+      'Approve & Pay…',
+      'Not now'
+    );
+    expect(vscode.window.showWarningMessage).toHaveBeenCalledTimes(1);
+    expect(approveClaimApi).not.toHaveBeenCalled();
+  });
+
+  it('"Approve & Pay…" after reviewing returns to the confirm and pays the same claim', async () => {
+    (getNostrUserPubkey as jest.Mock).mockResolvedValue('creator-pubkey');
+    (vscode.window.showWarningMessage as jest.Mock)
+      .mockResolvedValueOnce('Review changes')
+      .mockResolvedValueOnce('Yes, Approve Payout');
+    (vscode.window.showInformationMessage as jest.Mock).mockResolvedValueOnce('Approve & Pay…');
+    (approveClaimApi as jest.Mock).mockResolvedValue({
+      id: 'bounty-uuid',
+      claims: [{ status: 'approved' }],
+    });
+
+    approveClaimCommand(reviewableBounty(), { fire: jest.fn() } as any);
+    await capturedHandler!(createMockTestItem({ id: 'test-id' }));
+
+    // The confirm reopened only after the creator chose to come back to it.
+    const warn = vscode.window.showWarningMessage as jest.Mock;
+    const info = vscode.window.showInformationMessage as jest.Mock;
+    expect(warn).toHaveBeenCalledTimes(2);
+    expect(warn.mock.calls[1][1]).toEqual(expect.objectContaining({ modal: true }));
+    expect(info.mock.invocationCallOrder[0]).toBeLessThan(warn.mock.invocationCallOrder[1]);
+    // Same claim and claimant; nothing refetched or re-checked in between.
+    expect(approveClaimApi).toHaveBeenCalledWith('bounty-uuid', MOCK_CLAIM_ID, MOCK_CLAIMANT_PUBKEY);
+    expect(getPendingClaimsApi).toHaveBeenCalledTimes(1);
+    const { verifyClaimTrailer } = require('../git/claim-trailer');
+    expect(verifyClaimTrailer).toHaveBeenCalledTimes(1);
+  });
+
+  it('the review notification never shows a hidden payout address', async () => {
+    (getNostrUserPubkey as jest.Mock).mockResolvedValue('creator-pubkey');
+    (getPendingClaimsApi as jest.Mock).mockResolvedValue([
+      {
+        id: MOCK_CLAIM_ID,
+        claimantLnurl: null,
+        claimantPubkey: MOCK_CLAIMANT_PUBKEY,
+        claimedAt: new Date().toISOString(),
+        status: 'pending',
+        lnurlHidden: true,
+      },
+    ]);
+    (vscode.window.showWarningMessage as jest.Mock).mockResolvedValueOnce('Review changes');
+    (vscode.window.showInformationMessage as jest.Mock).mockResolvedValueOnce('Not now');
+
+    approveClaimCommand(reviewableBounty(), { fire: jest.fn() } as any);
+    await capturedHandler!(createMockTestItem({ id: 'test-id' }));
+
+    const [reviewing] = (vscode.window.showInformationMessage as jest.Mock).mock.calls[0];
+    expect(reviewing).toContain('to the claimant.');
+    expect(reviewing).not.toContain('@');
+  });
+
+  it('falls straight back to the confirm when there is no diff to show', async () => {
+    (getNostrUserPubkey as jest.Mock).mockResolvedValue('creator-pubkey');
+    const { readCommitPatches } = require('../git/claim-trailer');
+    (readCommitPatches as jest.Mock).mockReturnValueOnce('');
+    (vscode.window.showWarningMessage as jest.Mock)
+      .mockResolvedValueOnce('Review changes')
+      .mockResolvedValueOnce(undefined); // then cancels the confirm
+
+    approveClaimCommand(reviewableBounty(), { fire: jest.fn() } as any);
+    await capturedHandler!(createMockTestItem({ id: 'test-id' }));
+
+    // Nothing opened, so nothing to keep clear of: the confirm comes straight back.
+    expect(vscode.window.showTextDocument).not.toHaveBeenCalled();
+    expect(vscode.window.showInformationMessage).toHaveBeenCalledWith(
+      'No changes to show for this claim.'
+    );
+    expect(vscode.window.showInformationMessage).not.toHaveBeenCalledWith(
+      expect.stringContaining('Reviewing the claim'),
+      expect.anything(),
+      expect.anything()
+    );
+    expect(vscode.window.showWarningMessage).toHaveBeenCalledTimes(2);
+    expect(approveClaimApi).not.toHaveBeenCalled();
   });
 });
