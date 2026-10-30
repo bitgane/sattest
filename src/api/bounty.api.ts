@@ -12,6 +12,13 @@ export interface FetchBountiesOptions {
   includeInactive?: boolean;
   repo?: string;
   testIds?: string[];
+  /**
+   * Show an error notification when the fetch fails (the default). The
+   * extension's own refreshes pass false: they run in the background — at
+   * activation and on editor switches — where a toast interrupts someone who
+   * didn't ask for anything, so their failures are only logged.
+   */
+  notifyOnError?: boolean;
 }
 
 // Extension activation fires multiple fetchBounties() calls in quick
@@ -37,7 +44,7 @@ export function _resetRepoWarningForTests(): void {
 const FILTER_CHUNK_SIZE = 500;
 
 export async function fetchBounties(options: FetchBountiesOptions = {}): Promise<BountyInfo[]> {
-  const { testId, includeInactive = false, repo, testIds } = options;
+  const { testId, includeInactive = false, repo, testIds, notifyOnError = true } = options;
 
   // Git repo required — enforced here, at the single choke point every caller
   // goes through, so a new call site can't quietly reintroduce an unscoped
@@ -67,9 +74,7 @@ export async function fetchBounties(options: FetchBountiesOptions = {}): Promise
         chunks.push(testIds.slice(i, i + FILTER_CHUNK_SIZE));
       }
       const results = await Promise.all(
-        chunks.map((chunk) =>
-          fetchBounties({ testId, includeInactive, repo, testIds: chunk })
-        )
+        chunks.map((chunk) => fetchBounties({ ...options, testIds: chunk }))
       );
       const merged = new Map<string, BountyInfo>();
       for (const list of results) {
@@ -149,7 +154,7 @@ export async function fetchBounties(options: FetchBountiesOptions = {}): Promise
   } catch (error) {
     console.error('[fetchBounties] Error fetching bounties:', error);
     const now = Date.now();
-    if (now - lastFetchErrorToastAt > FETCH_ERROR_TOAST_COOLDOWN_MS) {
+    if (notifyOnError && now - lastFetchErrorToastAt > FETCH_ERROR_TOAST_COOLDOWN_MS) {
       lastFetchErrorToastAt = now;
       vscode.window.showErrorMessage('Failed to load bounties from backend');
     }

@@ -108,6 +108,36 @@ describe('fetchBounties', () => {
     // contract here, not the toast.
   });
 
+  it('logs but never toasts a failure when notifyOnError is false', async () => {
+    // Past the toast cooldown, so a suppressed toast can't pass for one that
+    // was merely rate-limited by an earlier failure in this suite.
+    jest.spyOn(Date, 'now').mockReturnValue(Date.now() + 60_000);
+    jest.spyOn(global, 'fetch').mockRejectedValue(new Error('Network error'));
+    const consoleError = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+    await expect(fetchBounties({ repo: REPO, notifyOnError: false })).resolves.toEqual([]);
+    expect(consoleError).toHaveBeenCalled();
+    expect(vscode.window.showErrorMessage).not.toHaveBeenCalled();
+
+    // The same failure, from a caller that wants to hear about it, still toasts.
+    await fetchBounties({ repo: REPO });
+    expect(vscode.window.showErrorMessage).toHaveBeenCalledWith(
+      'Failed to load bounties from backend'
+    );
+  });
+
+  it('carries notifyOnError into chunked requests', async () => {
+    jest.spyOn(Date, 'now').mockReturnValue(Date.now() + 120_000);
+    jest.spyOn(global, 'fetch').mockRejectedValue(new Error('Network error'));
+    jest.spyOn(console, 'error').mockImplementation(() => {});
+
+    const ids = Array.from({ length: 1100 }, (_, i) => `/t${i}.test.ts#x`);
+    await fetchBounties({ testIds: ids, repo: REPO, notifyOnError: false });
+
+    expect(global.fetch).toHaveBeenCalledTimes(3);
+    expect(vscode.window.showErrorMessage).not.toHaveBeenCalled();
+  });
+
   it('normalizes a missing `claims` field to an empty array', async () => {
     // Backend can return bounties without a `claims` field — the claim flow
     // and code-lens both index into it, so we need an array here, not undefined.

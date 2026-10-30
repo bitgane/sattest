@@ -1,34 +1,38 @@
 import * as vscode from 'vscode';
-import { execSync } from 'child_process';
+import { execFile } from 'child_process';
 import { myTestController } from './test-controller.js'; // adjust path to your controller import
 import { CustomTestItem, TestItemWrapper } from './test-item-wrapper.js';
 
-let cachedRepoSlug: string | undefined;
+let repoSlugLookup: Promise<string | undefined> | undefined;
 
-export function getRepoSlug(): string | undefined {
-  if (cachedRepoSlug !== undefined) {
-    return cachedRepoSlug || undefined;
+/**
+ * The workspace's "owner/repo" slug, from its `origin` remote. Looked up once
+ * and cached — a failed lookup included — so concurrent callers share one git
+ * call.
+ *
+ * Asynchronous so the git call never blocks the extension host; it used to
+ * run with `execSync` on the activation path.
+ */
+export function getRepoSlug(): Promise<string | undefined> {
+  repoSlugLookup ??= readRepoSlug();
+  return repoSlugLookup;
+}
+
+function readRepoSlug(): Promise<string | undefined> {
+  const root = workspaceRoot();
+  if (!root) {
+    return Promise.resolve(undefined);
   }
-
-  try {
-    const root = workspaceRoot();
-    if (!root) {
-      cachedRepoSlug = '';
-      return undefined;
-    }
-
-    const remoteUrl = execSync('git remote get-url origin', {
-      cwd: root,
-      encoding: 'utf-8',
-      timeout: 5000,
-    }).trim();
-
-    cachedRepoSlug = parseRepoSlug(remoteUrl);
-    return cachedRepoSlug || undefined;
-  } catch {
-    cachedRepoSlug = '';
-    return undefined;
-  }
+  return new Promise((resolve) => {
+    execFile(
+      'git',
+      ['remote', 'get-url', 'origin'],
+      { cwd: root, encoding: 'utf-8', timeout: 5000 },
+      (error, stdout) => {
+        resolve(error ? undefined : parseRepoSlug(stdout.trim()) || undefined);
+      }
+    );
+  });
 }
 
 export function parseRepoSlug(remoteUrl: string): string {

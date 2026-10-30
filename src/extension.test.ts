@@ -84,6 +84,12 @@ function createMockContext(): vscode.ExtensionContext {
   } as unknown as vscode.ExtensionContext;
 }
 
+/**
+ * Bounties load in the background after activate() resolves — let that load
+ * (and anything else queued during activation) run to completion.
+ */
+const backgroundWork = () => new Promise((resolve) => setImmediate(resolve));
+
 describe('extension', () => {
   describe('activate', () => {
     it('initializes secrets with context', async () => {
@@ -98,10 +104,75 @@ describe('extension', () => {
       expect(activateTestController).toHaveBeenCalledWith(context);
     });
 
-    it('fetches bounties on startup', async () => {
+    it('fetches bounties on startup, as background work', async () => {
       const context = createMockContext();
       await activate(context);
-      expect(fetchBounties).toHaveBeenCalled();
+      await backgroundWork();
+      expect(fetchBounties).toHaveBeenCalledWith(
+        // A failed background load is logged, never a notification.
+        expect.objectContaining({ repo: 'owner/repo', notifyOnError: false })
+      );
+    });
+
+    it('registers commands and CodeLens without waiting for the first bounty fetch', async () => {
+      // A backend that never answers. Activation used to await this fetch
+      // before registering anything, so commands reported "not found".
+      (fetchBounties as jest.Mock).mockReturnValueOnce(new Promise(() => {}));
+      const registered: string[] = [];
+      (vscode.commands.registerCommand as jest.Mock).mockImplementation((id: string) => {
+        registered.push(id);
+        return { dispose: jest.fn() };
+      });
+
+      await activate(createMockContext());
+
+      expect(registered).toEqual(
+        expect.arrayContaining([
+          'sattest.addBounty',
+          'sattest.claimBounty',
+          'sattest.approveClaim',
+          'sattest.removeBounty',
+          'sattest.connectNostr',
+        ])
+      );
+      expect(vscode.languages.registerCodeLensProvider).toHaveBeenCalled();
+    });
+
+    it('refetches on editor switches at most once per refresh window', async () => {
+      let editorChangeCallback: Function | undefined;
+      (vscode.window.onDidChangeActiveTextEditor as jest.Mock).mockImplementation(
+        (cb: Function) => {
+          editorChangeCallback = cb;
+          return { dispose: jest.fn() };
+        }
+      );
+      const start = Date.now();
+      const clock = jest.spyOn(Date, 'now').mockReturnValue(start);
+
+      await activate(createMockContext());
+      await backgroundWork();
+      (fetchBounties as jest.Mock).mockClear();
+      const tsEditor = { document: { languageId: 'typescript' } };
+
+      // Right after the startup load, switching files reuses it.
+      editorChangeCallback!(tsEditor);
+      editorChangeCallback!(tsEditor);
+      await backgroundWork();
+      expect(fetchBounties).not.toHaveBeenCalled();
+
+      // Once the window has passed, a burst of switches costs one fetch…
+      clock.mockReturnValue(start + 30_000);
+      editorChangeCallback!(tsEditor);
+      editorChangeCallback!(tsEditor);
+      editorChangeCallback!(tsEditor);
+      await backgroundWork();
+      expect(fetchBounties).toHaveBeenCalledTimes(1);
+
+      // …and starts the next window.
+      clock.mockReturnValue(start + 45_000);
+      editorChangeCallback!(tsEditor);
+      await backgroundWork();
+      expect(fetchBounties).toHaveBeenCalledTimes(1);
     });
 
     it('keeps the newest bounty when the backend returns duplicates for one test', async () => {
@@ -123,6 +194,7 @@ describe('extension', () => {
       ]);
 
       await activate(createMockContext());
+      await backgroundWork();
       expect(addBountyHandler).toBeDefined();
 
       // The duplicate-bounty guard reads the map attachTestItems filled — it
@@ -266,20 +338,26 @@ describe('extension', () => {
           return { dispose: jest.fn() };
         }
       );
+      const start = Date.now();
+      const clock = jest.spyOn(Date, 'now').mockReturnValue(start);
 
       const context = createMockContext();
       await activate(context);
+      await backgroundWork();
       expect(editorChangeCallback).toBeDefined();
 
+      (fetchBounties as jest.Mock).mockClear();
       (fetchBounties as jest.Mock).mockResolvedValue([{ testId: '/test-1', amountSats: 1000 }]);
+      clock.mockReturnValue(start + 30_000); // past the startup load's window
 
       editorChangeCallback!({
         document: { languageId: 'typescript' },
       });
+      await backgroundWork();
 
-      // Let the .then() chain resolve
-      await new Promise((resolve) => process.nextTick(resolve));
-      await new Promise((resolve) => process.nextTick(resolve));
+      expect(fetchBounties).toHaveBeenCalledWith(
+        expect.objectContaining({ repo: 'owner/repo', notifyOnError: false })
+      );
     });
 
     it('editor change callback handles fetch error', async () => {
@@ -290,18 +368,23 @@ describe('extension', () => {
           return { dispose: jest.fn() };
         }
       );
+      const start = Date.now();
+      const clock = jest.spyOn(Date, 'now').mockReturnValue(start);
 
       const context = createMockContext();
       await activate(context);
+      await backgroundWork();
 
       (fetchBounties as jest.Mock).mockRejectedValue(new Error('fail'));
+      clock.mockReturnValue(start + 30_000);
 
       editorChangeCallback!({
         document: { languageId: 'javascript' },
       });
+      await backgroundWork();
 
-      await new Promise((resolve) => process.nextTick(resolve));
-      await new Promise((resolve) => process.nextTick(resolve));
+      // Logged, never a notification: nobody asked for this refresh.
+      expect(vscode.window.showErrorMessage).not.toHaveBeenCalled();
     });
 
     it('editor change callback ignores non-ts/js editors', async () => {
@@ -370,6 +453,7 @@ describe('extension', () => {
 
       const context = createMockContext();
       await activate(context);
+      await backgroundWork();
 
       expect(findTestItemById).toHaveBeenCalledWith('/test-1', expect.any(Map));
       expect(findTestItemById).toHaveBeenCalledWith('/test-2', expect.any(Map));
@@ -383,6 +467,7 @@ describe('extension', () => {
 
       const context = createMockContext();
       await activate(context);
+      await backgroundWork();
     });
   });
 

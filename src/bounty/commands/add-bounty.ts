@@ -220,7 +220,7 @@ export const addBountyCommand = (
       // and a bounty with no repo can never appear in it again — so refuse to
       // create one rather than minting a row that's only reachable by SQL.
       // (Bounties created before this rule are in exactly that position.)
-      const repoSlug = getRepoSlug();
+      const repoSlug = await getRepoSlug();
       if (!repoSlug) {
         vscode.window.showErrorMessage(
           'Sattest needs a git repository with an "origin" remote to create a bounty — ' +

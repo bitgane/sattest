@@ -12,7 +12,7 @@ import {
 import { myTestController } from './test-controller.js';
 
 jest.mock('child_process', () => ({
-  execSync: jest.fn(),
+  execFile: jest.fn(),
 }));
 
 // We need to mock the test-controller module before importing test-item.util
@@ -235,54 +235,80 @@ describe('parseRepoSlug', () => {
 describe('getRepoSlug', () => {
   // getRepoSlug memoizes — re-import per test to clear the cache.
   let getRepoSlug: typeof import('./test-item.util.js').getRepoSlug;
-  let execSync: jest.Mock;
+  let execFile: jest.Mock;
+
+  /** Make the mocked `git remote get-url origin` print `stdout`, or fail with `error`. */
+  function gitAnswers(result: { stdout?: string; error?: Error }) {
+    execFile.mockImplementation((_cmd: string, _args: string[], _opts: object, callback: Function) =>
+      callback(result.error ?? null, result.stdout ?? '', '')
+    );
+  }
 
   beforeEach(() => {
     jest.resetModules();
-    jest.doMock('child_process', () => ({ execSync: jest.fn() }));
+    jest.doMock('child_process', () => ({ execFile: jest.fn() }));
     jest.doMock('./test-controller', () => ({
       myTestController: { items: { forEach: jest.fn(), get size() { return 0; } } },
     }));
     getRepoSlug = require('./test-item.util.js').getRepoSlug;
-    execSync = require('child_process').execSync;
+    execFile = require('child_process').execFile;
   });
 
-  it('returns slug parsed from `git remote get-url origin`', () => {
-    execSync.mockReturnValue('git@github.com:bitgane/sattest.git\n');
-    expect(getRepoSlug()).toBe('bitgane/sattest');
+  it('returns slug parsed from `git remote get-url origin`', async () => {
+    gitAnswers({ stdout: 'git@github.com:bitgane/sattest.git\n' });
+    await expect(getRepoSlug()).resolves.toBe('bitgane/sattest');
+    // Argument array, no shell: nothing from the workspace reaches a command line.
+    expect(execFile).toHaveBeenCalledWith(
+      'git',
+      ['remote', 'get-url', 'origin'],
+      expect.objectContaining({ cwd: '/mock/workspace', timeout: 5000 }),
+      expect.any(Function)
+    );
   });
 
-  it('memoizes the result — second call does not re-shell', () => {
-    execSync.mockReturnValue('git@github.com:owner/repo.git\n');
-    expect(getRepoSlug()).toBe('owner/repo');
-    execSync.mockClear();
-    expect(getRepoSlug()).toBe('owner/repo');
-    expect(execSync).not.toHaveBeenCalled();
+  it('memoizes the result — second call does not re-run git', async () => {
+    gitAnswers({ stdout: 'git@github.com:owner/repo.git\n' });
+    await expect(getRepoSlug()).resolves.toBe('owner/repo');
+    execFile.mockClear();
+    await expect(getRepoSlug()).resolves.toBe('owner/repo');
+    expect(execFile).not.toHaveBeenCalled();
   });
 
-  it('returns undefined when git is unavailable', () => {
-    execSync.mockImplementation(() => {
-      throw new Error('not a git repo');
-    });
-    expect(getRepoSlug()).toBeUndefined();
+  it('shares one git call between concurrent callers', async () => {
+    let answer!: () => void;
+    execFile.mockImplementation(
+      (_cmd: string, _args: string[], _opts: object, callback: Function) => {
+        answer = () => callback(null, 'git@github.com:owner/repo.git\n', '');
+      }
+    );
+
+    const first = getRepoSlug();
+    const second = getRepoSlug();
+    answer();
+
+    await expect(Promise.all([first, second])).resolves.toEqual(['owner/repo', 'owner/repo']);
+    expect(execFile).toHaveBeenCalledTimes(1);
   });
 
-  it('memoizes the failure — second call does not re-shell', () => {
-    execSync.mockImplementation(() => {
-      throw new Error('not a git repo');
-    });
-    expect(getRepoSlug()).toBeUndefined();
-    execSync.mockClear();
-    expect(getRepoSlug()).toBeUndefined();
-    expect(execSync).not.toHaveBeenCalled();
+  it('returns undefined when git is unavailable', async () => {
+    gitAnswers({ error: new Error('not a git repo') });
+    await expect(getRepoSlug()).resolves.toBeUndefined();
   });
 
-  it('returns undefined when there is no workspace root', () => {
+  it('memoizes the failure — second call does not re-run git', async () => {
+    gitAnswers({ error: new Error('not a git repo') });
+    await expect(getRepoSlug()).resolves.toBeUndefined();
+    execFile.mockClear();
+    await expect(getRepoSlug()).resolves.toBeUndefined();
+    expect(execFile).not.toHaveBeenCalled();
+  });
+
+  it('returns undefined when there is no workspace root', async () => {
     const originalFolders = (require('vscode') as typeof import('vscode')).workspace.workspaceFolders;
     ((require('vscode') as any).workspace).workspaceFolders = undefined;
     try {
-      expect(getRepoSlug()).toBeUndefined();
-      expect(execSync).not.toHaveBeenCalled();
+      await expect(getRepoSlug()).resolves.toBeUndefined();
+      expect(execFile).not.toHaveBeenCalled();
     } finally {
       ((require('vscode') as any).workspace).workspaceFolders = originalFolders;
     }

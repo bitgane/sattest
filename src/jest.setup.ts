@@ -75,6 +75,12 @@ jest.mock('vscode', () => {
     },
     onDidOpenTextDocument: jest.fn().mockReturnValue({ dispose: jest.fn() }),
     getConfiguration: jest.fn().mockReturnValue(mockConfiguration),
+    createFileSystemWatcher: jest.fn().mockImplementation(() => ({
+      onDidCreate: jest.fn().mockReturnValue({ dispose: jest.fn() }),
+      onDidChange: jest.fn().mockReturnValue({ dispose: jest.fn() }),
+      onDidDelete: jest.fn().mockReturnValue({ dispose: jest.fn() }),
+      dispose: jest.fn(),
+    })),
     // Untitled documents, e.g. the claim diff the approve flow opens for review.
     openTextDocument: jest.fn().mockImplementation(async (options: any) => ({
       uri: { scheme: 'untitled', fsPath: 'Untitled-1' },
@@ -185,6 +191,8 @@ jest.mock('vscode', () => {
     },
     languages: {
       registerCodeLensProvider: jest.fn().mockReturnValue({ dispose: jest.fn() }),
+      // Score of a document against a selector; 0 = no match.
+      match: jest.fn().mockReturnValue(0),
     },
     TestRunProfileKind: {
       Run: 1,

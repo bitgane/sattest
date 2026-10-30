@@ -26,6 +26,12 @@ import { setAuthRefresher } from './api/authed-fetch.js';
 import { getNostrUserPubkey, initializeSecrets } from './state.js';
 import { SUPPORTED_LANGUAGE_IDS } from './test/language-configs.js';
 
+/**
+ * How long a bounty load stays fresh for editor switches. Switching to another
+ * test file within this window reuses it rather than refetching.
+ */
+const EDITOR_SWITCH_REFRESH_INTERVAL_MS = 30_000;
+
 export async function activate(context: vscode.ExtensionContext) {
   initializeSecrets(context);
 
@@ -55,21 +61,6 @@ export async function activate(context: vscode.ExtensionContext) {
   void refreshNostrHandleIfStale().catch((err) =>
     console.debug('[Extension] Handle refresh skipped:', err)
   );
-
-  // Resolve repo slug once at startup for all bounty queries
-  const repoSlug = getRepoSlug();
-
-  // Load bounties from backend on startup
-  let backendBounties: BountyInfo[] = [];
-  try {
-    backendBounties = await fetchBounties({ repo: repoSlug });
-    attachTestItems(backendBounties, bounties);
-  } catch (err) {
-    console.error('[Extension] Failed to load bounties from backend on startup:', err);
-  }
-
-  // Force initial refresh
-  onBountiesChangedEmitter.fire();
 
   // Register commands
   context.subscriptions.push(
@@ -112,18 +103,43 @@ export async function activate(context: vscode.ExtensionContext) {
     }
   });
 
-  // Refresh bounties & lenses when switching active editor
+  // Load bounties in the background, now that every command and the CodeLens
+  // provider are registered. Activation used to await this fetch (which has no
+  // timeout of its own) before registering anything, so while the backend was
+  // slow or unreachable Sattest's commands were "not found" and no lenses
+  // rendered.
+  //
+  // Background loads never raise a notification: a failure is logged, and
+  // anything the user starts reports its own errors.
+  let lastLoadStartedAt = 0;
+  const loadBounties = async () => {
+    lastLoadStartedAt = Date.now();
+    try {
+      const localIds = getLocalTestIds();
+      const backendBounties = await fetchBounties({
+        repo: await getRepoSlug(),
+        testIds: localIds.length > 0 ? localIds : undefined,
+        notifyOnError: false,
+      });
+      attachTestItems(backendBounties, bounties);
+      onBountiesChangedEmitter.fire();
+    } catch (err) {
+      console.error('[Extension] Failed to load bounties from backend:', err);
+    }
+  };
+  void loadBounties();
+
+  // Refresh bounties & lenses when switching active editor — at most once per
+  // window, since every switch used to refetch.
   context.subscriptions.push(
     vscode.window.onDidChangeActiveTextEditor((editor) => {
-      if (editor && SUPPORTED_LANGUAGE_IDS.includes(editor.document.languageId)) {
+      if (
+        editor &&
+        SUPPORTED_LANGUAGE_IDS.includes(editor.document.languageId) &&
+        Date.now() - lastLoadStartedAt >= EDITOR_SWITCH_REFRESH_INTERVAL_MS
+      ) {
         console.debug('[Extension] Active editor changed – refreshing bounties & lenses');
-        const localIds = getLocalTestIds();
-        fetchBounties({ repo: repoSlug, testIds: localIds.length > 0 ? localIds : undefined })
-          .then((backendBounties) => {
-            attachTestItems(backendBounties, bounties);
-            onBountiesChangedEmitter.fire();
-          })
-          .catch((err) => console.error('[Extension] Refresh failed:', err));
+        void loadBounties();
       }
     })
   );
@@ -133,14 +149,7 @@ export async function activate(context: vscode.ExtensionContext) {
     const count = myTestController.items.size;
     if (count > 0) {
       clearInterval(checkTestItemsInterval);
-      const localIds = getLocalTestIds();
-      fetchBounties({ repo: repoSlug, testIds: localIds.length > 0 ? localIds : undefined })
-        .then((filtered) => {
-          backendBounties = filtered;
-          attachTestItems(backendBounties, bounties);
-          onBountiesChangedEmitter.fire();
-        })
-        .catch((err) => console.error('[Extension] Filtered re-fetch failed:', err));
+      void loadBounties();
     }
   }, 2000);
 
