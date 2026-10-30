@@ -6,7 +6,7 @@ import {
   claimBountyCommand,
   approveClaimCommand,
 } from './bounty.util.js';
-import { BountyInfo, ClaimInfo, ClaimStatus } from './bounty.types.js';
+import { BountyInfo, ClaimInfo, ClaimStatus, FundingMode } from './bounty.types.js';
 import {
   createBounty as createBountyApi,
   checkPaidStatus,
@@ -641,22 +641,47 @@ describe('removeBountyCommand', () => {
     );
   });
 
-  it('paid bounty with pending claim: shows extra warning; declining aborts', async () => {
+  it('paid bounty with pending claim: the confirm names the waiting claimant; declining aborts', async () => {
     const bounties = new Map<string, BountyInfo>();
     bounties.set('test-id', paidBounty({ claims: [{ status: 'pending' } as ClaimInfo] }));
     const mockEmitter = { fire: jest.fn() } as any;
     const mockContext = createMockContext();
 
-    (vscode.window.showWarningMessage as jest.Mock)
-      .mockResolvedValueOnce('Yes, Remove') // initial confirm
-      .mockResolvedValueOnce(undefined); // pending-claim warning declined
+    (vscode.window.showWarningMessage as jest.Mock).mockResolvedValueOnce(undefined);
 
     removeBountyCommand(bounties, mockEmitter, mockContext);
     await capturedHandler!(createMockTestItem({ id: 'test-id' }));
 
+    const [, options, button] = (vscode.window.showWarningMessage as jest.Mock).mock.calls[0];
+    expect(options.detail).toMatch(/waiting for your review/);
+    expect(button).toBe('Remove and Cancel Claim');
     expect(deactivateBounty).not.toHaveBeenCalled();
     expect(vscode.window.showInputBox).not.toHaveBeenCalled();
     expect(bounties.size).toBe(1);
+  });
+
+  it('paid bounty with pending claim: confirming goes straight to the refund prompt', async () => {
+    const bounties = new Map<string, BountyInfo>();
+    bounties.set('test-id', paidBounty({ claims: [{ status: 'pending' } as ClaimInfo] }));
+    const mockEmitter = { fire: jest.fn() } as any;
+    const mockContext = createMockContext();
+
+    (vscode.window.showWarningMessage as jest.Mock).mockResolvedValueOnce(
+      'Remove and Cancel Claim'
+    );
+    (vscode.window.showInputBox as jest.Mock).mockResolvedValueOnce('alice@primal.net');
+    (deactivateBounty as jest.Mock).mockResolvedValue({
+      success: true,
+      refund: { checkingId: 'chk-1', amountSats: 1000 },
+    });
+
+    removeBountyCommand(bounties, mockEmitter, mockContext);
+    await capturedHandler!(createMockTestItem({ id: 'test-id' }));
+
+    // One confirmation, not two: the confirm already named the pending claim.
+    expect(vscode.window.showWarningMessage).toHaveBeenCalledTimes(1);
+    expect(deactivateBounty).toHaveBeenCalledWith('bounty-uuid', 'alice@primal.net');
+    expect(bounties.size).toBe(0);
   });
 
   it('paid bounty: cancelling LNURL prompt aborts without API call', async () => {
@@ -773,6 +798,134 @@ describe('removeBountyCommand', () => {
 
     expect(bounties.size).toBe(1);
     expect(mockEmitter.fire).not.toHaveBeenCalled();
+  });
+
+  // ── Claim state ──────────────────────────────────────────────────────────
+  it('NWC bounty with pending claim: warns that removing cancels the claim', async () => {
+    // NWC is the default funding mode. The pending-claim warning used to live
+    // on the custodial refund path only, so this removal dropped the claimant
+    // behind a generic "Remove N sats bounty?" confirm.
+    const bounties = new Map<string, BountyInfo>();
+    bounties.set(
+      'test-id',
+      paidBounty({ fundingMode: 'nwc', claims: [{ status: 'pending' } as ClaimInfo] })
+    );
+    const mockEmitter = { fire: jest.fn() } as any;
+    const mockContext = createMockContext();
+
+    (vscode.window.showWarningMessage as jest.Mock).mockResolvedValueOnce(
+      'Remove and Cancel Claim'
+    );
+    (deactivateBounty as jest.Mock).mockResolvedValue({ success: true });
+
+    removeBountyCommand(bounties, mockEmitter, mockContext);
+    await capturedHandler!(createMockTestItem({ id: 'test-id' }));
+
+    const [message, options, button] = (vscode.window.showWarningMessage as jest.Mock).mock
+      .calls[0];
+    expect(message).not.toMatch(/paid/i);
+    expect(options).toEqual(expect.objectContaining({ modal: true }));
+    expect(options.detail).toMatch(/waiting for your review/);
+    expect(options.detail).toMatch(/cancels their claim/);
+    expect(button).toBe('Remove and Cancel Claim');
+    // Nothing was ever custodied, so there's no refund to ask about.
+    expect(vscode.window.showInputBox).not.toHaveBeenCalled();
+    expect(deactivateBounty).toHaveBeenCalledWith('bounty-uuid', undefined);
+    expect(bounties.size).toBe(0);
+  });
+
+  it('NWC bounty with pending claim: dismissing the warning keeps the bounty', async () => {
+    const bounties = new Map<string, BountyInfo>();
+    bounties.set(
+      'test-id',
+      paidBounty({ fundingMode: 'nwc', claims: [{ status: 'pending' } as ClaimInfo] })
+    );
+    const mockEmitter = { fire: jest.fn() } as any;
+    const mockContext = createMockContext();
+
+    (vscode.window.showWarningMessage as jest.Mock).mockResolvedValueOnce(undefined);
+
+    removeBountyCommand(bounties, mockEmitter, mockContext);
+    await capturedHandler!(createMockTestItem({ id: 'test-id' }));
+
+    expect(deactivateBounty).not.toHaveBeenCalled();
+    expect(mockEmitter.fire).not.toHaveBeenCalled();
+    expect(bounties.size).toBe(1);
+  });
+
+  it.each<[string, FundingMode | undefined]>([
+    ['NWC', 'nwc'],
+    ['custodial', undefined],
+  ])('%s bounty with a payout in flight: refuses to remove it', async (_label, fundingMode) => {
+    const bounties = new Map<string, BountyInfo>();
+    bounties.set(
+      'test-id',
+      paidBounty({ fundingMode, claims: [{ status: 'approving' } as ClaimInfo] })
+    );
+    const mockEmitter = { fire: jest.fn() } as any;
+    const mockContext = createMockContext();
+
+    removeBountyCommand(bounties, mockEmitter, mockContext);
+    await capturedHandler!(createMockTestItem({ id: 'test-id' }));
+
+    // Explains instead of confirming: no modal, no refund prompt, no API call.
+    expect(vscode.window.showWarningMessage).toHaveBeenCalledTimes(1);
+    const [message, options] = (vscode.window.showWarningMessage as jest.Mock).mock.calls[0];
+    expect(message).toMatch(/still being confirmed/);
+    expect(message).toContain('"Payout Processing" lens');
+    expect(options).toBeUndefined();
+    expect(vscode.window.showInputBox).not.toHaveBeenCalled();
+    expect(deactivateBounty).not.toHaveBeenCalled();
+    expect(bounties.size).toBe(1);
+  });
+
+  it('counts a bounty as paid even when a newer pending claim is listed first', async () => {
+    // Listings are newest-first, so a claim filed after the payout sits at
+    // claims[0]. Reading only that one treated the bounty as unpaid and, on a
+    // custodial bounty, offered to refund sats that were already paid out.
+    const bounties = new Map<string, BountyInfo>();
+    bounties.set(
+      'test-id',
+      paidBounty({
+        claims: [{ status: 'pending' } as ClaimInfo, { status: 'approved' } as ClaimInfo],
+      })
+    );
+    const mockEmitter = { fire: jest.fn() } as any;
+    const mockContext = createMockContext();
+
+    (vscode.window.showWarningMessage as jest.Mock).mockResolvedValueOnce('Yes, Remove');
+    (deactivateBounty as jest.Mock).mockResolvedValue({ success: true });
+
+    removeBountyCommand(bounties, mockEmitter, mockContext);
+    await capturedHandler!(createMockTestItem({ id: 'test-id' }));
+
+    const [message, options] = (vscode.window.showWarningMessage as jest.Mock).mock.calls[0];
+    expect(message).toMatch(/paid/i);
+    expect(options.detail).toMatch(/already paid out/i);
+    expect(vscode.window.showInputBox).not.toHaveBeenCalled();
+    expect(deactivateBounty).toHaveBeenCalledWith('bounty-uuid', undefined);
+  });
+
+  it('refuses removal when a payout is in flight behind a newer pending claim', async () => {
+    const bounties = new Map<string, BountyInfo>();
+    bounties.set(
+      'test-id',
+      paidBounty({
+        claims: [{ status: 'pending' } as ClaimInfo, { status: 'approving' } as ClaimInfo],
+      })
+    );
+    const mockEmitter = { fire: jest.fn() } as any;
+    const mockContext = createMockContext();
+
+    removeBountyCommand(bounties, mockEmitter, mockContext);
+    await capturedHandler!(createMockTestItem({ id: 'test-id' }));
+
+    expect(vscode.window.showWarningMessage).toHaveBeenCalledWith(
+      expect.stringContaining('still being confirmed')
+    );
+    expect(vscode.window.showInputBox).not.toHaveBeenCalled();
+    expect(deactivateBounty).not.toHaveBeenCalled();
+    expect(bounties.size).toBe(1);
   });
 });
 
