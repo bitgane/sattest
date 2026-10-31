@@ -15,7 +15,9 @@ function isAbsolutePathLike(value: string): boolean {
 }
 
 /**
- * The claim state the lens should display for a bounty.
+ * The claim state the lens should display for a bounty. Commands that act on
+ * claim state (e.g. Remove Bounty) read it here too, so they never disagree
+ * with what the lens shows.
  *
  * A bounty can carry several open claims — the backend deliberately returns all
  * of them so the creator chooses whom to pay — so `claims[0]` is not "the

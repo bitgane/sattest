@@ -69,11 +69,14 @@ export function describeTopCommit(result: ClaimEvidenceResult): string | undefin
  * commits on any ref (including ones not checked out), and shows all of the
  * claimant's commits in one scrollable view. Never throws — failing to open a
  * review must not derail an approval the creator can still make.
+ *
+ * Resolves true once the patch is on screen, false when there was nothing to
+ * show or it couldn't be opened.
  */
 export async function showClaimDiff(
   result: ClaimEvidenceResult,
   claimantPubkey: string | null
-): Promise<void> {
+): Promise<boolean> {
   try {
     const patch = await vscode.window.withProgress(
       { location: vscode.ProgressLocation.Notification, title: 'Sattest: loading changes…' },
@@ -81,7 +84,7 @@ export async function showClaimDiff(
     );
     if (!patch.trim()) {
       vscode.window.showInformationMessage('No changes to show for this claim.');
-      return;
+      return false;
     }
     const header =
       `# Sattest — changes claimed by ${claimantPubkey ?? 'unknown claimant'}\n` +
@@ -92,11 +95,13 @@ export async function showClaimDiff(
       language: 'diff',
     });
     await vscode.window.showTextDocument(doc, { preview: true, preserveFocus: false });
+    return true;
   } catch (err) {
     console.error('[showClaimDiff] failed:', err);
     vscode.window.showWarningMessage(
       `Couldn't load the claimant's changes: ${err instanceof Error ? err.message : 'Unknown error'}`
     );
+    return false;
   }
 }
 

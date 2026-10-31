@@ -75,6 +75,18 @@ jest.mock('vscode', () => {
     },
     onDidOpenTextDocument: jest.fn().mockReturnValue({ dispose: jest.fn() }),
     getConfiguration: jest.fn().mockReturnValue(mockConfiguration),
+    createFileSystemWatcher: jest.fn().mockImplementation(() => ({
+      onDidCreate: jest.fn().mockReturnValue({ dispose: jest.fn() }),
+      onDidChange: jest.fn().mockReturnValue({ dispose: jest.fn() }),
+      onDidDelete: jest.fn().mockReturnValue({ dispose: jest.fn() }),
+      dispose: jest.fn(),
+    })),
+    // Untitled documents, e.g. the claim diff the approve flow opens for review.
+    openTextDocument: jest.fn().mockImplementation(async (options: any) => ({
+      uri: { scheme: 'untitled', fsPath: 'Untitled-1' },
+      getText: () => options?.content ?? '',
+      languageId: options?.language,
+    })),
   };
 
   const testItemChildren = new Map();
@@ -145,6 +157,7 @@ jest.mock('vscode', () => {
       showQuickPick: jest.fn().mockResolvedValue(undefined),
       showErrorMessage: jest.fn().mockResolvedValue(undefined),
       showWarningMessage: jest.fn().mockResolvedValue(undefined),
+      showTextDocument: jest.fn().mockResolvedValue(undefined),
       visibleTextEditors: [],
       onDidChangeActiveTextEditor: jest.fn().mockReturnValue({ dispose: jest.fn() }),
       // Runs the task immediately with a stub progress reporter and returns its
@@ -154,6 +167,11 @@ jest.mock('vscode', () => {
         task({ report: jest.fn() }, { isCancellationRequested: false, onCancellationRequested: jest.fn() })
       ),
       createWebviewPanel: jest.fn().mockImplementation((viewType, title, viewColumn, options) => {
+        // As in VS Code, disposing a panel runs its onDidDispose listeners,
+        // once — so work tied to a panel's lifetime (the invoice poller's
+        // interval) stops when the panel closes.
+        const disposeListeners: Array<() => void> = [];
+        let disposed = false;
         return {
           webview: {
             html: '',
@@ -163,9 +181,15 @@ jest.mock('vscode', () => {
           },
           title,
           viewColumn,
-          dispose: jest.fn(),
-          onDidDispose: jest.fn().mockImplementation((cb: any) => {
-            // Store dispose callback for testing
+          dispose: jest.fn(() => {
+            if (disposed) {
+              return;
+            }
+            disposed = true;
+            disposeListeners.splice(0).forEach((listener) => listener());
+          }),
+          onDidDispose: jest.fn().mockImplementation((listener: () => void) => {
+            disposeListeners.push(listener);
             return { dispose: jest.fn() };
           }),
           onDidChangeViewState: jest.fn(),
@@ -178,6 +202,8 @@ jest.mock('vscode', () => {
     },
     languages: {
       registerCodeLensProvider: jest.fn().mockReturnValue({ dispose: jest.fn() }),
+      // Score of a document against a selector; 0 = no match.
+      match: jest.fn().mockReturnValue(0),
     },
     TestRunProfileKind: {
       Run: 1,
@@ -212,5 +238,11 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // Close the panels the test opened, as VS Code closes them with the window.
+  // Anything tied to a panel's lifetime — the invoice poller's 10s interval —
+  // would otherwise keep running after the test, and keep Jest from exiting.
+  for (const opened of (vscode.window.createWebviewPanel as jest.Mock).mock.results) {
+    opened.value?.dispose?.();
+  }
   jest.restoreAllMocks();
 });

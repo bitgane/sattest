@@ -89,6 +89,39 @@ export const approveClaimCommand = (
       return;
     }
 
+    // NWC bounties pay out from the creator's own connected Lightning wallet,
+    // which the backend reads server-side at approval time. If the extension
+    // can't detect a connected wallet — the URI was never saved/was cleared, or
+    // the Nostr session needed to read it has lapsed — the /approve call fails
+    // before doing anything useful (and, when the session is gone, never even
+    // reaches the backend). Prompt the creator to (re)connect their wallet so
+    // they can paste their NWC URI and complete the payout.
+    //
+    // Checked before any question about the claim: this used to run after the
+    // payout confirmation, so the creator was told their wallet was missing
+    // only after they had already said "pay".
+    if (bounty.fundingMode !== 'custodial') {
+      let nwc = await getNwcStatus();
+      if (!nwc.configured) {
+        const choice = await vscode.window.showWarningMessage(
+          'Your Lightning wallet (NWC) isn\'t connected, so this payout can\'t be sent. Connect it to complete the approval.',
+          'Connect Wallet',
+          'Cancel'
+        );
+        if (choice !== 'Connect Wallet') {
+          return;
+        }
+        await vscode.commands.executeCommand('sattest.connectWallet');
+        nwc = await getNwcStatus();
+        if (!nwc.configured) {
+          vscode.window.showWarningMessage(
+            'Lightning wallet still not connected — claim not approved.'
+          );
+          return;
+        }
+      }
+    }
+
     // Look up each claimant's trailer commits in local git. This is evidence
     // for the creator to read, not a verdict: teams differ, and "in your
     // branch" is the same answer whether they merged a fork's PR or simply
@@ -239,10 +272,14 @@ export const approveClaimCommand = (
         'Re-check Payout'
       );
     } else {
-      // Loop so "Review changes" opens the patch and returns to the same
-      // decision, rather than dropping the creator out of the flow. Reviewing
-      // the code is the whole point of the trailer binding — the dialog is
-      // where that decision is made, so the diff belongs one click away from it.
+      // "Review changes" opens the claimant's patch, then gets out of the way.
+      // A modal blocks the whole window, so reopening this dialog straight away
+      // left the diff unreadable behind it — the only way to read it was to
+      // cancel the approval. A non-modal notification keeps the decision one
+      // click away instead, and choosing it comes back to this same dialog for
+      // the same claim: nothing is refetched or re-picked, so the claim binding
+      // below is unchanged. Reviewing the code is the whole point of the trailer
+      // binding; this dialog stays the one place a payout is confirmed.
       const canReview = chosen.result.commits.length > 0;
       for (;;) {
         // Modal dialogs render VS Code's own Cancel button — passing an
@@ -274,41 +311,23 @@ export const approveClaimCommand = (
         if (confirmed !== 'Review changes') {
           break;
         }
-        await showClaimDiff(chosen.result, pendingClaim.claimantPubkey);
+        // When the diff couldn't be shown there's nothing behind the dialog to
+        // read, so fall straight back to it.
+        if (await showClaimDiff(chosen.result, pendingClaim.claimantPubkey)) {
+          const next = await vscode.window.showInformationMessage(
+            `Reviewing the claim on "${test.label}": ${bounty.amountSats} sats to ${destinationLine}.`,
+            'Approve & Pay…',
+            'Not now'
+          );
+          if (next !== 'Approve & Pay…') {
+            return; // reviewed and walked away → approve nothing
+          }
+        }
       }
     }
 
     if (confirmed !== (isRecheck ? 'Re-check Payout' : 'Yes, Approve Payout')) {
       return;
-    }
-
-    // NWC bounties pay out from the creator's own connected Lightning wallet,
-    // which the backend reads server-side at approval time. If the extension
-    // can't detect a connected wallet — the URI was never saved/was cleared, or
-    // the Nostr session needed to read it has lapsed — the /approve call fails
-    // before doing anything useful (and, when the session is gone, never even
-    // reaches the backend). Prompt the creator to (re)connect their wallet so
-    // they can paste their NWC URI and complete the payout.
-    if (bounty.fundingMode !== 'custodial') {
-      let nwc = await getNwcStatus();
-      if (!nwc.configured) {
-        const choice = await vscode.window.showWarningMessage(
-          'Your Lightning wallet (NWC) isn\'t connected, so this payout can\'t be sent. Connect it to complete the approval.',
-          'Connect Wallet',
-          'Cancel'
-        );
-        if (choice !== 'Connect Wallet') {
-          return;
-        }
-        await vscode.commands.executeCommand('sattest.connectWallet');
-        nwc = await getNwcStatus();
-        if (!nwc.configured) {
-          vscode.window.showWarningMessage(
-            'Lightning wallet still not connected — claim not approved.'
-          );
-          return;
-        }
-      }
     }
 
     inFlight.add(bounty.id);

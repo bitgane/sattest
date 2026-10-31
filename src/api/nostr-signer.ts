@@ -40,6 +40,7 @@ export function waitForSignerHandshake(
 ): Promise<string> {
   return new Promise<string>((resolve, reject) => {
     let done = false;
+    let sub: ReturnType<SimplePool['subscribe']> | undefined;
     const finish = (fn: () => void) => {
       if (done) {
         return;
@@ -47,7 +48,7 @@ export function waitForSignerHandshake(
       done = true;
       clearTimeout(timer);
       try {
-        sub.close();
+        sub?.close();
       } catch {
         /* already closed */
       }
@@ -55,63 +56,70 @@ export function waitForSignerHandshake(
     };
     const timer = setTimeout(() => finish(() => reject(new Error('Timeout'))), timeoutMs);
 
-    const sub = pool.subscribe(
-      relays,
-      { kinds: [NOSTR_CONNECT_KIND], '#p': [clientPubkey] },
-      {
-        onevent: (event) => {
-          if (done) {
-            return;
-          }
-          // Decrypt NIP-44 first (current spec), fall back to NIP-04 (what a
-          // number of signers still send for the connect response).
-          let payload: string;
-          try {
-            payload = nip44.decrypt(
-              event.content,
-              nip44.getConversationKey(clientSecretBytes, event.pubkey)
-            );
-          } catch {
-            try {
-              payload = nip04.decrypt(clientSecretBytes, event.pubkey, event.content);
-            } catch {
-              console.warn(
-                '[Nostr Connect] Dropping undecryptable kind-24133 event from',
-                event.pubkey
-              );
+    try {
+      sub = pool.subscribe(
+        relays,
+        { kinds: [NOSTR_CONNECT_KIND], '#p': [clientPubkey] },
+        {
+          onevent: (event) => {
+            if (done) {
               return;
             }
-          }
-          try {
-            const response = JSON.parse(payload);
-            // Only the secret echo authenticates the signer (see the function
-            // docblock). A legacy "ack" carries no proof the responder knows
-            // the secret — it could come from any relay that saw our
-            // subscription — so it is rejected as a possible hijack attempt.
-            if (response.result === secret) {
-              finish(() => resolve(event.pubkey));
-            } else if (response.result === 'ack') {
-              console.warn(
-                '[Nostr Connect] Rejected legacy "ack" connect response: it does not echo the ' +
-                  'pairing secret and cannot be authenticated (possible pairing-hijack attempt). ' +
-                  'Update your signer — NIP-46 requires echoing the secret.'
+            // Decrypt NIP-44 first (current spec), fall back to NIP-04 (what a
+            // number of signers still send for the connect response).
+            let payload: string;
+            try {
+              payload = nip44.decrypt(
+                event.content,
+                nip44.getConversationKey(clientSecretBytes, event.pubkey)
               );
-            } else if (response.error) {
-              console.warn('[Nostr Connect] Signer reported error during connect:', response.error);
-            } else {
-              console.warn(
-                '[Nostr Connect] Ignoring connect response with unexpected result:',
-                response.result
-              );
+            } catch {
+              try {
+                payload = nip04.decrypt(clientSecretBytes, event.pubkey, event.content);
+              } catch {
+                console.warn(
+                  '[Nostr Connect] Dropping undecryptable kind-24133 event from',
+                  event.pubkey
+                );
+                return;
+              }
             }
-          } catch (e) {
-            console.warn('[Nostr Connect] Malformed connect payload:', e);
-          }
-        },
-        onclose: () =>
-          finish(() => reject(new Error('Relay subscription closed before the signer responded'))),
-      }
-    );
+            try {
+              const response = JSON.parse(payload);
+              // Only the secret echo authenticates the signer (see the function
+              // docblock). A legacy "ack" carries no proof the responder knows
+              // the secret — it could come from any relay that saw our
+              // subscription — so it is rejected as a possible hijack attempt.
+              if (response.result === secret) {
+                finish(() => resolve(event.pubkey));
+              } else if (response.result === 'ack') {
+                console.warn(
+                  '[Nostr Connect] Rejected legacy "ack" connect response: it does not echo the ' +
+                    'pairing secret and cannot be authenticated (possible pairing-hijack attempt). ' +
+                    'Update your signer — NIP-46 requires echoing the secret.'
+                );
+              } else if (response.error) {
+                console.warn('[Nostr Connect] Signer reported error during connect:', response.error);
+              } else {
+                console.warn(
+                  '[Nostr Connect] Ignoring connect response with unexpected result:',
+                  response.result
+                );
+              }
+            } catch (e) {
+              console.warn('[Nostr Connect] Malformed connect payload:', e);
+            }
+          },
+          onclose: () =>
+            finish(() => reject(new Error('Relay subscription closed before the signer responded'))),
+        }
+      );
+    } catch (err) {
+      // The subscription never started, so no answer can come: settle now. That
+      // also clears the timeout, which used to stay armed for the full window
+      // after the attempt had already failed.
+      finish(() => reject(err));
+    }
   });
 }
 

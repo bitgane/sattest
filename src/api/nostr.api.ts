@@ -319,9 +319,14 @@ export async function resolveNostrInfoFromBunkerSigner(
     );
   };
 
+  // One pending auto-close at a time, cancelled if the panel is closed first,
+  // so no timer outlives the panel it was for.
+  let closeTimer: ReturnType<typeof setTimeout> | undefined;
   const closePanel = (delay = 2000) => {
-    setTimeout(() => panel.dispose(), delay);
+    clearTimeout(closeTimer);
+    closeTimer = setTimeout(() => panel.dispose(), delay);
   };
+  panel.onDidDispose(() => clearTimeout(closeTimer));
 
   // Handle manual close from Webview
   const disposable = panel.webview.onDidReceiveMessage((msg) => {
