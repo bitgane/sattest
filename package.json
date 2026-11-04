@@ -1,0 +1,225 @@
+{
+  "name": "sattest",
+  "publisher": "bitgane",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bitgane/sattest.git"
+  },
+  "license": "MIT",
+  "icon": "images/icon.png",
+  "type": "module",
+  "displayName": "Sattest — Lightning Test Bounties",
+  "description": "Attach Bitcoin Lightning bounties to your tests — stored on Nostr, no server, and paid wallet-to-wallet over Nostr Wallet Connect (NWC).",
+  "version": "0.2.0",
+  "engines": {
+    "vscode": "^1.106.0"
+  },
+  "categories": [
+    "Testing",
+    "Other"
+  ],
+  "keywords": [
+    "bitcoin",
+    "lightning",
+    "nostr",
+    "nwc",
+    "bounty",
+    "testing",
+    "satoshis",
+    "lnurl",
+    "nip-47",
+    "decentralized"
+  ],
+  "activationEvents": [
+    "onLanguage:typescript",
+    "onLanguage:javascript",
+    "onLanguage:typescriptreact",
+    "onLanguage:javascriptreact",
+    "onLanguage:java",
+    "onLanguage:python",
+    "onLanguage:go",
+    "onLanguage:rust",
+    "onLanguage:csharp",
+    "onLanguage:ruby",
+    "onLanguage:php",
+    "onLanguage:kotlin",
+    "onLanguage:swift",
+    "onLanguage:scala",
+    "onLanguage:cpp",
+    "onLanguage:c",
+    "onView:testing"
+  ],
+  "main": "./out/extension.js",
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "Sattest signs Nostr events with your identity, pays approved claims from your Lightning wallet (NWC), and runs git in the workspace. A workspace must be trusted before the extension activates."
+    }
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "sattest.addBounty",
+        "title": "Add Bounty",
+        "category": "Sattest Bounty"
+      },
+      {
+        "command": "sattest.claimBounty",
+        "title": "Claim Bounty",
+        "category": "Sattest Claim"
+      },
+      {
+        "command": "sattest.addClaimTrailer",
+        "title": "Add Claim Trailer to Latest Commit",
+        "category": "Sattest Claim"
+      },
+      {
+        "command": "sattest.removeBounty",
+        "title": "Remove Bounty",
+        "category": "Sattest Bounty"
+      },
+      {
+        "command": "sattest.connectNostr",
+        "title": "Connect Nostr",
+        "category": "Sattest Nostr"
+      },
+      {
+        "command": "sattest.approveClaim",
+        "title": "Approve Claim",
+        "category": "Sattest Claim"
+      },
+      {
+        "command": "sattest.connectWallet",
+        "title": "Connect Lightning Wallet (NWC)",
+        "category": "Sattest Bounty"
+      },
+      {
+        "command": "sattest.disconnectWallet",
+        "title": "Disconnect Lightning Wallet (NWC)",
+        "category": "Sattest Bounty"
+      }
+    ],
+    "keybindings": [
+      {
+        "key": "ctrl+alt+n",
+        "mac": "cmd+alt+n",
+        "command": "sattest.connectNostr",
+        "when": "true"
+      }
+    ],
+    "configuration": {
+      "title": "Sattest",
+      "properties": {
+        "sattest.nostrRelays": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "wss://relay.damus.io",
+            "wss://relay.primal.net",
+            "wss://nos.lol"
+          ],
+          "scope": "machine",
+          "markdownDescription": "Nostr relay WebSocket URLs used for the NIP-46 signer connection. **Machine-scoped**: only your User settings can change it, never a workspace's `.vscode/settings.json`, so a repo can't redirect signer traffic to attacker-controlled relays. Entries must be `wss://` (or `ws://localhost` for local development); others are ignored."
+        },
+        "sattest.bountyRelays": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "wss://relay.damus.io",
+            "wss://nos.lol",
+            "wss://relay.primal.net"
+          ],
+          "scope": "machine",
+          "markdownDescription": "Nostr relays where bounties and claims are published and read. There is no Sattest server: bounty state lives in signed events on these relays. Use several independent relays — any one can go down or drop events, but none can forge them. **Machine-scoped**: a workspace can't change it. Entries must be `wss://` (or `ws://localhost` for local development)."
+        },
+        "sattest.trustedCreators": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "scope": "machine",
+          "markdownDescription": "Nostr public keys (hex or `npub`) of bounty creators you trust, such as a project's maintainers. When a test has several bounties, the CodeLens shows yours first, then these creators', then the newest — so a stranger can't displace a maintainer's bounty by posting a newer one."
+        }
+      }
+    },
+    "menus": {
+      "testing/item/gutter": [
+        {
+          "command": "sattest.addBounty",
+          "group": "navigation"
+        },
+        {
+          "command": "sattest.claimBounty",
+          "group": "navigation"
+        },
+        {
+          "command": "sattest.removeBounty",
+          "group": "navigation"
+        },
+        {
+          "command": "sattest.approveClaim",
+          "group": "navigation"
+        }
+      ],
+      "testing/item/context": [
+        {
+          "command": "sattest.addBounty",
+          "group": "inline"
+        },
+        {
+          "command": "sattest.claimBounty",
+          "group": "inline"
+        },
+        {
+          "command": "sattest.removeBounty",
+          "group": "inline"
+        },
+        {
+          "command": "sattest.approveClaim",
+          "group": "inline"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src",
+    "test": "jest",
+    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md}\"",
+    "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,md}\"",
+    "inspect": "node scripts/sattest-inspect.mjs"
+  },
+  "devDependencies": {
+    "@types/jest": "^30.0.0",
+    "@types/node": "22.x",
+    "@types/qrcode": "^1.5.6",
+    "@types/vscode": "^1.106.0",
+    "@vscode/test-cli": "^0.0.15",
+    "@vscode/test-electron": "^2.5.2",
+    "eslint": "^9.39.1",
+    "jest": "^30.5.2",
+    "prettier": "^3.8.1",
+    "ts-jest": "^29.4.6",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.48.1"
+  },
+  "dependencies": {
+    "light-bolt11-decoder": "^3.2.0",
+    "nostr-tools": "^2.23.1",
+    "qrcode": "^1.5.4"
+  },
+  "overrides": {
+    "mocha": {
+      "serialize-javascript": "^7.0.5",
+      "diff": "^8.0.3"
+    }
+  }
+}

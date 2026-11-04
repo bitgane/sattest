@@ -1,0 +1,12 @@
+# User-specific workspace settings
+workspace.xml
+
+# Data sources and credentials
+/dataSources
+*.xml
+
+# Other user-specific or generated files/folders
+*.meta
+usage.statistics.xml
+dictionaries/
+shelf/

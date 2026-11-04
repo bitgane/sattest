@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <!-- sattest icon: { ⚡ } -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1f1f22"/>
+      <stop offset="1" stop-color="#0f0f12"/>
+    </linearGradient>
+    <linearGradient id="bolt" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFD166"/>
+      <stop offset="0.45" stop-color="#FFB627"/>
+      <stop offset="1" stop-color="#F7931A"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.55" r="0.55">
+      <stop offset="0" stop-color="#F7931A" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#F7931A" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Rounded square tile (matches VS Code dark-theme vibe) -->
+  <rect x="0" y="0" width="128" height="128" rx="24" ry="24" fill="url(#bg)"/>
+
+  <!-- Soft amber halo behind the bolt -->
+  <circle cx="64" cy="70" r="48" fill="url(#glow)"/>
+
+  <!-- Left curly brace -->
+  <path d="
+    M 38 26
+    C 30 26, 28 30, 28 38
+    L 28 56
+    C 28 62, 24 64, 20 64
+    C 24 64, 28 66, 28 72
+    L 28 90
+    C 28 98, 30 102, 38 102
+  "
+    fill="none" stroke="#F7931A" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Right curly brace (mirror) -->
+  <path d="
+    M 90 26
+    C 98 26, 100 30, 100 38
+    L 100 56
+    C 100 62, 104 64, 108 64
+    C 104 64, 100 66, 100 72
+    L 100 90
+    C 100 98, 98 102, 90 102
+  "
+    fill="none" stroke="#F7931A" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Lightning bolt (zigzag also reads as a checkmark stroke) -->
+  <path d="
+    M 70 24
+    L 44 70
+    L 62 70
+    L 54 104
+    L 88 56
+    L 70 56
+    Z
+  "
+    fill="url(#bolt)"
+    stroke="#7A3E00"
+    stroke-width="2"
+    stroke-linejoin="round"/>
+
+  <!-- Inner highlight on bolt for depth -->
+  <path d="
+    M 70 24
+    L 44 70
+    L 62 70
+  "
+    fill="none"
+    stroke="#FFF2C6"
+    stroke-width="1.5"
+    stroke-linecap="round"
+    stroke-opacity="0.8"/>
+</svg>
